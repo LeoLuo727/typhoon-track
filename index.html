@@ -43,6 +43,10 @@
         .fcst-date-tooltip::before {
             display: none !important;
         }
+        .himawari-ir-tile {
+            filter: contrast(1.14) saturate(1.03);
+            image-rendering: auto;
+        }
     </style>
 </head>
 <body class="bg-slate-900 flex flex-col relative">
@@ -163,6 +167,28 @@
                     </button>
                 </div>
 
+                <!-- Himawari 真實色衛星雲圖 -->
+                <div class="mt-3 pt-3 border-t border-gray-200">
+                    <h4 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 7 7 0 10-12.768 5.74" /></svg>
+                        衛星雲圖
+                    </h4>
+                    <button data-layer="himawari" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-sky-50 text-sky-700 border border-sky-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-sky-50" data-active-text="text-sky-700" data-active-border="border-sky-200" data-dot="bg-sky-500">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-sky-500 indicator-dot transition-colors"></div>
+                            <span>Himawari 融合雲圖</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <div class="mt-2 flex items-center gap-2">
+                        <label for="himawariOpacity" class="text-[10px] text-slate-500 w-12 shrink-0">透明度</label>
+                        <input type="range" id="himawariOpacity" min="0" max="1" step="0.05" value="0.75" class="flex-1 h-1 accent-sky-500 cursor-pointer">
+                        <span id="himawariOpacityVal" class="text-[10px] text-slate-500 w-9 text-right">75%</span>
+                        <button id="btnRefreshHimawari" class="px-2 py-1 bg-white border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold text-slate-600 transition-colors shadow-sm" title="重新讀取最新 Himawari 融合雲圖">更新</button>
+                    </div>
+                    <p id="himawariStatus" class="text-[10px] text-gray-400 mt-1.5">正在讀取 JMA 最新融合雲圖...</p>
+                </div>
+
                 <!-- 暴風圈樣式自訂區塊 -->
                 <div class="mt-3 pt-3 border-t border-gray-200">
                     <h4 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
@@ -222,8 +248,17 @@
     <script>
         // 初始化地圖與圖層群組
         const map = L.map('map', { zoomControl: true, attributionControl: true });
+        map.setView([23.7, 121.0], 5);
         
         // 創建自訂地圖窗格 (Panes) 以確保圖層順序正確 (暴風圈與軌跡需在潛勢區之上)
+        map.createPane('himawariPane');
+        map.getPane('himawariPane').style.zIndex = 350;
+        map.getPane('himawariPane').style.pointerEvents = 'none';
+
+        map.createPane('coastlinePane');
+        map.getPane('coastlinePane').style.zIndex = 408;
+        map.getPane('coastlinePane').style.pointerEvents = 'none';
+
         map.createPane('seaWarnPane');
         map.getPane('seaWarnPane').style.zIndex = 405;
 
@@ -242,6 +277,7 @@
         const layerFcstTrack = L.layerGroup().addTo(map);
         const layerPastTrack = L.layerGroup().addTo(map);
         const layerCenter = L.layerGroup().addTo(map);
+        const layerHimawari = L.layerGroup().addTo(map);
 
         // 定義多種底圖樣式
         const baseMaps = {
@@ -262,6 +298,7 @@
                 const geojson = topojson.feature(topology, topology.objects.countries);
                 L.geoJSON(geojson, {
                     interactive: false,
+                    pane: 'coastlinePane',
                     style: f => (f.id === '158' || f.id === 158 || (f.properties && f.properties.name === 'Taiwan')) 
                         ? { color: '#fbbf24', weight: 4, fill: false, opacity: 1 }
                         : { color: '#f3f4f6', weight: 2, fill: false, opacity: 0.7 }
@@ -568,7 +605,7 @@
         });
 
         // 3. 圖層開關控制
-        const layerMap = { 'prob': layerProbArea, 'fcstWind': layerFcstWind, 'currWind': layerCurrWind, 'fcstTrack': layerFcstTrack, 'pastTrack': layerPastTrack };
+        const layerMap = { 'prob': layerProbArea, 'fcstWind': layerFcstWind, 'currWind': layerCurrWind, 'fcstTrack': layerFcstTrack, 'pastTrack': layerPastTrack, 'himawari': layerHimawari };
         document.querySelectorAll('.layer-toggle-btn').forEach(btn => {
             btn.addEventListener('click', function() {
                 const layerKey = this.getAttribute('data-layer');
@@ -659,6 +696,383 @@
         ['fcstWindColor', 'fcstWindFill', 'fcstWindWeight', 'currWindColor', 'currWindFill', 'currWindWeight'].forEach(id => {
             document.getElementById(id).addEventListener('input', applyWindStyleAndRedraw);
         });
+
+        // ==========================================
+        // Himawari 真實色 + 紅外線融合衛星雲圖讀取邏輯
+        // ==========================================
+        const HIMAWARI_TARGET_TIMES_URL = 'https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json';
+        const HIMAWARI_TILE_BASE_URL = 'https://www.jma.go.jp/bosai/himawari/data/satimg';
+        const HIMAWARI_TRUE_COLOR_PATH = 'REP/ETC';
+        const HIMAWARI_INFRARED_PATH = 'B13/TBB';
+        const HIMAWARI_PRODUCT_LABEL = '真實色 + 紅外線融合';
+        const HIMAWARI_TARGET_TIME_SOURCES = [
+            HIMAWARI_TARGET_TIMES_URL,
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(HIMAWARI_TARGET_TIMES_URL)}`,
+            `https://corsproxy.io/?${encodeURIComponent(HIMAWARI_TARGET_TIMES_URL)}`
+        ];
+        let himawariTileLayer = null;
+        let himawariLatestKey = '';
+        let himawariOpacity = 0.75;
+        const HIMAWARI_NATIVE_MIN_ZOOM = 3;
+        const HIMAWARI_NATIVE_MAX_ZOOM = 5;
+        const CLOUD_ALPHA_START = 30;
+        const CLOUD_ALPHA_FULL = 188;
+        const CLOUD_ALPHA_MAX = 244;
+        const CLOUD_CHROMA_LIMIT = 92;
+        const CLOUD_CONTRAST = 1.32;
+        const CLOUD_TEXTURE_STRENGTH = 3.2;
+        const CLOUD_FINE_ALPHA_GAIN = 1.15;
+        const CLOUD_BRIGHTNESS_BOOST = 8;
+        const CLOUD_HIGHLIGHT_START = 168;
+        const CLOUD_HIGHLIGHT_RANGE = 74;
+        const CLOUD_HIGHLIGHT_COMPRESSION = 0.48;
+        const INFRARED_ALPHA_START = 22;
+        const INFRARED_ALPHA_FULL = 152;
+        const INFRARED_TONE_STRENGTH = 0.42;
+        const TRUE_COLOR_STRENGTH = 0.48;
+        const HIMAWARI_RENDER_SCALE = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+
+        function pickLatestHimawariTime(targetTimes) {
+            return targetTimes
+                .filter(item => item && item.basetime && item.validtime)
+                .sort((a, b) => a.validtime.localeCompare(b.validtime))
+                .at(-1);
+        }
+
+        function formatJMATimeForTaiwan(jmaTimeText) {
+            if (!/^\d{14}$/.test(jmaTimeText || '')) return '未知時間';
+            const y = Number(jmaTimeText.slice(0, 4));
+            const m = Number(jmaTimeText.slice(4, 6)) - 1;
+            const d = Number(jmaTimeText.slice(6, 8));
+            const hh = Number(jmaTimeText.slice(8, 10));
+            const mm = Number(jmaTimeText.slice(10, 12));
+            const date = new Date(Date.UTC(y, m, d, hh, mm));
+
+            return new Intl.DateTimeFormat('zh-TW', {
+                timeZone: 'Asia/Taipei',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            }).format(date);
+        }
+
+        function setHimawariStatus(text, colorClass = 'text-gray-400') {
+            const statusEl = document.getElementById('himawariStatus');
+            statusEl.textContent = text;
+            statusEl.className = `text-[10px] ${colorClass} mt-1.5`;
+        }
+
+        function getHimawariTileUrl(targetTime, coords, productPath) {
+            return `${HIMAWARI_TILE_BASE_URL}/${targetTime.basetime}/fd/${targetTime.validtime}/${productPath}/${coords.z}/${coords.x}/${coords.y}.jpg`;
+        }
+
+        function getHimawariSourceTile(targetTime, coords, productPath) {
+            const sourceZoom = Math.max(HIMAWARI_NATIVE_MIN_ZOOM, Math.min(HIMAWARI_NATIVE_MAX_ZOOM, coords.z));
+            const overzoomFactor = Math.pow(2, Math.max(0, coords.z - sourceZoom));
+            const sourceX = Math.floor(coords.x / overzoomFactor);
+            const sourceY = Math.floor(coords.y / overzoomFactor);
+            const cropSize = 256 / overzoomFactor;
+            const cropX = (coords.x % overzoomFactor) * cropSize;
+            const cropY = (coords.y % overzoomFactor) * cropSize;
+
+            return {
+                url: getHimawariTileUrl(targetTime, { z: sourceZoom, x: sourceX, y: sourceY }, productPath),
+                cropX,
+                cropY,
+                cropSize
+            };
+        }
+
+        function smoothstep(value) {
+            const t = Math.max(0, Math.min(1, value));
+            return t * t * (3 - 2 * t);
+        }
+
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        function createRenderCanvas(width, height) {
+            const renderCanvas = document.createElement('canvas');
+            renderCanvas.width = width;
+            renderCanvas.height = height;
+            return renderCanvas;
+        }
+
+        function loadHimawariImage(url) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.decoding = 'async';
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error(`無法載入圖磚：${url}`));
+                img.src = url;
+            });
+        }
+
+        function drawSourceToCanvas(targetTime, coords, productPath, width, height) {
+            return loadHimawariImage(getHimawariSourceTile(targetTime, coords, productPath).url)
+                .then(img => {
+                    const sourceTile = getHimawariSourceTile(targetTime, coords, productPath);
+                    const renderCanvas = createRenderCanvas(width, height);
+                    const renderCtx = renderCanvas.getContext('2d', { willReadFrequently: true });
+                    const scaleX = img.naturalWidth / 256;
+                    const scaleY = img.naturalHeight / 256;
+
+                    renderCtx.imageSmoothingEnabled = true;
+                    renderCtx.imageSmoothingQuality = 'high';
+                    renderCtx.drawImage(
+                        img,
+                        sourceTile.cropX * scaleX,
+                        sourceTile.cropY * scaleY,
+                        sourceTile.cropSize * scaleX,
+                        sourceTile.cropSize * scaleY,
+                        0,
+                        0,
+                        width,
+                        height
+                    );
+
+                    return renderCtx.getImageData(0, 0, width, height);
+                });
+        }
+
+        function applyHybridCloudMask(ctx, trueColorImageData, infraredImageData, width, height) {
+            const trueData = trueColorImageData?.data || null;
+            const irData = infraredImageData?.data || null;
+            const output = ctx.createImageData(width, height);
+            const outData = output.data;
+            const trueLumaMap = new Float32Array(width * height);
+            const irLumaMap = new Float32Array(width * height);
+            const whitenessMap = new Float32Array(width * height);
+
+            for (let i = 0, p = 0; i < outData.length; i += 4, p++) {
+                const r = trueData ? trueData[i] : 0;
+                const g = trueData ? trueData[i + 1] : 0;
+                const b = trueData ? trueData[i + 2] : 0;
+                const maxChannel = Math.max(r, g, b);
+                const minChannel = Math.min(r, g, b);
+                const chroma = maxChannel - minChannel;
+
+                trueLumaMap[p] = r * 0.299 + g * 0.587 + b * 0.114;
+                irLumaMap[p] = irData
+                    ? irData[i] * 0.299 + irData[i + 1] * 0.587 + irData[i + 2] * 0.114
+                    : trueLumaMap[p];
+                whitenessMap[p] = Math.max(0, Math.min(1, 1 - chroma / CLOUD_CHROMA_LIMIT));
+            }
+
+            for (let y = 0; y < height; y++) {
+                const row = y * width;
+                const rowAbove = Math.max(0, y - 1) * width;
+                const rowBelow = Math.min(height - 1, y + 1) * width;
+
+                for (let x = 0; x < width; x++) {
+                    const p = row + x;
+                    const i = p * 4;
+                    const left = row + Math.max(0, x - 1);
+                    const right = row + Math.min(width - 1, x + 1);
+                    const luma = trueLumaMap[p];
+                    const irLuma = irLumaMap[p];
+                    const whiteness = whitenessMap[p];
+                    const localMean = (
+                        luma * 4 +
+                        trueLumaMap[left] +
+                        trueLumaMap[right] +
+                        trueLumaMap[rowAbove + x] +
+                        trueLumaMap[rowBelow + x]
+                    ) / 8;
+                    const localMeanDiagonal = (
+                        localMean * 2 +
+                        trueLumaMap[rowAbove + Math.max(0, x - 1)] +
+                        trueLumaMap[rowAbove + Math.min(width - 1, x + 1)] +
+                        trueLumaMap[rowBelow + Math.max(0, x - 1)] +
+                        trueLumaMap[rowBelow + Math.min(width - 1, x + 1)]
+                    ) / 6;
+                    const irLocalMean = (
+                        irLuma * 4 +
+                        irLumaMap[left] +
+                        irLumaMap[right] +
+                        irLumaMap[rowAbove + x] +
+                        irLumaMap[rowBelow + x]
+                    ) / 8;
+                    const localTexture = luma - localMean;
+                    const fineTexture = luma - localMeanDiagonal;
+                    const irTexture = irLuma - irLocalMean;
+                    const contrastedLuma = 128 + (luma - 128) * CLOUD_CONTRAST;
+                    const texturedLuma = Math.max(0, Math.min(255, contrastedLuma + localTexture * CLOUD_TEXTURE_STRENGTH + fineTexture * 1.15));
+                    const chromaPenalty = 1 - whiteness;
+                    const cloudThreshold = CLOUD_ALPHA_START + chromaPenalty * 58;
+                    const normalized = Math.max(0, Math.min(1, (luma - cloudThreshold) / (CLOUD_ALPHA_FULL - cloudThreshold)));
+                    const smoothAlpha = smoothstep(normalized);
+                    const irAlpha = smoothstep((irLuma - INFRARED_ALPHA_START) / (INFRARED_ALPHA_FULL - INFRARED_ALPHA_START));
+                    const fineCloudBoost = Math.max(0, fineTexture + 5) * CLOUD_FINE_ALPHA_GAIN * (0.35 + whiteness * 0.65);
+                    const alphaBoost = Math.max(0, localTexture) * 0.48 * (0.25 + whiteness * 0.75) + fineCloudBoost;
+                    const cloudAlphaBase = CLOUD_ALPHA_MAX * smoothAlpha * (0.18 + whiteness * 0.82);
+                    const irAlphaBoost = Math.max(0, irTexture + 4) * 0.8;
+                    const trueAlpha = cloudAlphaBase + alphaBoost;
+                    const infraredAlpha = CLOUD_ALPHA_MAX * irAlpha + irAlphaBoost;
+                    const highlightLevel = smoothstep((Math.max(luma, irLuma) - CLOUD_HIGHLIGHT_START) / CLOUD_HIGHLIGHT_RANGE);
+                    const combinedTexture = localTexture * 0.55 + fineTexture * 0.85 + irTexture * 0.72;
+                    const textureCarve = clamp(combinedTexture * (1.05 + highlightLevel * 1.35), -42, 38);
+                    const alpha = Math.round(clamp(
+                        Math.max(trueAlpha * 0.72, infraredAlpha * 0.92) * (1 - highlightLevel * 0.08) + Math.max(0, combinedTexture) * 0.58 + smoothAlpha * 18,
+                        0,
+                        248
+                    ));
+                    const detailBoost = (texturedLuma - luma) * 0.36 + CLOUD_BRIGHTNESS_BOOST * (1 - highlightLevel * 0.55);
+                    const irTone = clamp(52 + (128 + (irLuma - 128) * 1.18 + irTexture * 2.15) * 0.76, 0, 245);
+                    const trueR = trueData ? trueData[i] : irTone;
+                    const trueG = trueData ? trueData[i + 1] : irTone;
+                    const trueB = trueData ? trueData[i + 2] : irTone;
+                    const trueVisibleWeight = Math.max(0, Math.min(TRUE_COLOR_STRENGTH, smoothAlpha * TRUE_COLOR_STRENGTH));
+                    const irWeight = Math.max(0.34, Math.min(0.76, irAlpha * INFRARED_TONE_STRENGTH + 0.34));
+                    const totalWeight = Math.max(0.01, trueVisibleWeight + irWeight);
+                    const baseCloudR = (trueR * trueVisibleWeight + irTone * irWeight) / totalWeight;
+                    const baseCloudG = (trueG * trueVisibleWeight + irTone * irWeight) / totalWeight;
+                    const baseCloudB = (trueB * trueVisibleWeight + Math.min(255, irTone + 4) * irWeight) / totalWeight;
+                    const rawR = baseCloudR + detailBoost * 0.32 + textureCarve;
+                    const rawG = baseCloudG + detailBoost * 0.32 + textureCarve;
+                    const rawB = baseCloudB + detailBoost * 0.36 + textureCarve;
+                    const compressR = Math.max(0, rawR - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+                    const compressG = Math.max(0, rawG - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+                    const compressB = Math.max(0, rawB - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+
+                    outData[i] = clamp(rawR - compressR, 0, 240);
+                    outData[i + 1] = clamp(rawG - compressG, 0, 240);
+                    outData[i + 2] = clamp(rawB - compressB, 0, 244);
+                    outData[i + 3] = alpha;
+                }
+            }
+
+            ctx.putImageData(output, 0, 0);
+        }
+
+        function createHimawariTileLayer(targetTime) {
+            const gridLayer = L.gridLayer({
+                pane: 'himawariPane',
+                minZoom: HIMAWARI_NATIVE_MIN_ZOOM,
+                maxZoom: 19,
+                opacity: himawariOpacity,
+                tileSize: 256,
+                className: 'himawari-ir-tile',
+                attribution: `Himawari-8/9 ${HIMAWARI_PRODUCT_LABEL} imagery: JMA`
+            });
+
+            gridLayer.createTile = function(coords, done) {
+                const size = this.getTileSize();
+                const canvas = L.DomUtil.create('canvas', 'leaflet-tile himawari-ir-tile');
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                const renderWidth = Math.round(size.x * HIMAWARI_RENDER_SCALE);
+                const renderHeight = Math.round(size.y * HIMAWARI_RENDER_SCALE);
+
+                canvas.width = renderWidth;
+                canvas.height = renderHeight;
+                canvas.style.width = `${size.x}px`;
+                canvas.style.height = `${size.y}px`;
+                canvas.style.background = 'transparent';
+
+                Promise.allSettled([
+                    drawSourceToCanvas(targetTime, coords, HIMAWARI_TRUE_COLOR_PATH, renderWidth, renderHeight),
+                    drawSourceToCanvas(targetTime, coords, HIMAWARI_INFRARED_PATH, renderWidth, renderHeight)
+                ]).then(results => {
+                    const trueColorImageData = results[0].status === 'fulfilled' ? results[0].value : null;
+                    const infraredImageData = results[1].status === 'fulfilled' ? results[1].value : null;
+
+                    try {
+                        if (!trueColorImageData && !infraredImageData) {
+                            throw new Error('真實色與紅外線圖磚皆無法載入');
+                        }
+
+                        applyHybridCloudMask(ctx, trueColorImageData, infraredImageData, renderWidth, renderHeight);
+                        done(null, canvas);
+                    } catch (err) {
+                        console.warn('Himawari hybrid cloud processing failed:', err);
+                        done(null, canvas);
+                    }
+                });
+
+                return canvas;
+            };
+
+            return gridLayer;
+        }
+
+        async function fetchHimawariTargetTimes() {
+            let lastError = null;
+
+            for (const sourceUrl of HIMAWARI_TARGET_TIME_SOURCES) {
+                try {
+                    const response = await fetch(sourceUrl, {
+                        cache: 'no-store',
+                        signal: AbortSignal.timeout(15000)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const targetTimes = await response.json();
+                    if (!Array.isArray(targetTimes)) {
+                        throw new Error('影像時間清單格式不正確');
+                    }
+
+                    return targetTimes;
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+
+            throw lastError || new Error('無法讀取 Himawari 影像時間清單');
+        }
+
+        async function loadLatestHimawariLayer({ silent = false } = {}) {
+            if (!silent) {
+                setHimawariStatus('正在讀取 JMA 最新融合雲圖...', 'text-blue-500');
+            }
+
+            try {
+                const targetTimes = await fetchHimawariTargetTimes();
+                const latest = pickLatestHimawariTime(targetTimes);
+
+                if (!latest) {
+                    throw new Error('JMA 未回傳可用影像時間');
+                }
+
+                const latestKey = `${latest.basetime}_${latest.validtime}`;
+                const displayTime = formatJMATimeForTaiwan(latest.validtime);
+
+                if (latestKey !== himawariLatestKey || !himawariTileLayer) {
+                    if (himawariTileLayer) {
+                        layerHimawari.removeLayer(himawariTileLayer);
+                    }
+                    himawariTileLayer = createHimawariTileLayer(latest);
+                    layerHimawari.addLayer(himawariTileLayer);
+                    himawariLatestKey = latestKey;
+                }
+
+                setHimawariStatus(`最新 Himawari 透明融合雲圖：${displayTime} 台灣時間`, 'text-emerald-600 font-semibold');
+            } catch (err) {
+                console.warn('Himawari layer fetch failed:', err);
+                setHimawariStatus(`Himawari 雲圖讀取失敗：${err.message || '未知錯誤'}`, 'text-red-500 font-semibold');
+            }
+        }
+
+        document.getElementById('himawariOpacity').addEventListener('input', function() {
+            himawariOpacity = parseFloat(this.value);
+            document.getElementById('himawariOpacityVal').textContent = `${Math.round(himawariOpacity * 100)}%`;
+            if (himawariTileLayer) {
+                himawariTileLayer.setOpacity(himawariOpacity);
+            }
+        });
+
+        document.getElementById('btnRefreshHimawari').addEventListener('click', () => {
+            loadLatestHimawariLayer();
+        });
+
+        loadLatestHimawariLayer();
+        setInterval(() => loadLatestHimawariLayer({ silent: true }), 10 * 60 * 1000);
 
         // 5. 軌跡時間標籤防重疊動態調整與手動拖曳演算法 (由下至上單向避讓，支援手動拖曳且不遮擋軌跡)
         function adjustTooltipPositions() {
