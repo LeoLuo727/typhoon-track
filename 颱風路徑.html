@@ -1,0 +1,1411 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>颱風動態預測圖 - Taiwan Alerts</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- 引入 TopoJSON 函式庫以解析高精度地圖資料 -->
+    <script src="https://unpkg.com/topojson-client@3"></script>
+    <!-- 引入 Turf.js 以計算完美平滑的地空間多邊形 (不確定性圓錐包絡線) -->
+    <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Noto Sans TC', sans-serif; }
+        #map { height: calc(100vh - 64px); width: 100%; z-index: 1;}
+        .custom-tooltip {
+            background-color: rgba(255, 255, 255, 0.95);
+            border: 2px solid #ef4444;
+            color: #991b1b;
+            font-weight: 700;
+            padding: 6px 10px;
+            border-radius: 6px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            font-size: 0.875rem; 
+        }
+        /* 預測時間浮動標籤樣式 - 膠囊形狀、白色邊框、不透明度調低的半透明深色底 */
+        .fcst-date-tooltip {
+            background: rgba(15, 23, 42, 0.65) !important;
+            border: 1.5px solid #ffffff !important;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.15), 0 2px 4px -1px rgba(0, 0, 0, 0.1) !important;
+            color: #ffffff !important;
+            font-weight: 700;
+            font-size: 0.8rem; 
+            border-radius: 9999px !important;
+            padding: 3px 10px !important;
+            letter-spacing: 0.05em;
+            pointer-events: auto !important; /* 關鍵：開啟滑鼠與觸控事件接收，允許拖曳與雙擊 */
+        }
+        .fcst-date-tooltip::before {
+            display: none !important;
+        }
+        .himawari-ir-tile {
+            filter: contrast(1.14) saturate(1.03);
+            image-rendering: auto;
+        }
+    </style>
+</head>
+<body class="bg-slate-900 flex flex-col relative">
+
+    <!-- 定義 SVG 網底斜線圖案 -->
+    <svg width="0" height="0" style="position: absolute; z-index: -1;" aria-hidden="true">
+        <defs>
+            <pattern id="diagonalHatch" width="8" height="8" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+                <rect width="8" height="8" fill="rgba(255, 255, 255, 0.35)"></rect>
+                <line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255, 255, 255, 0.85)" stroke-width="2"></line>
+            </pattern>
+        </defs>
+    </svg>
+
+    <!-- 標題列 -->
+    <header class="bg-slate-800 text-white h-16 flex items-center justify-between px-6 shadow-md z-10 relative">
+        <div>
+            <h1 id="headerTitle" class="text-lg md:text-xl font-bold tracking-wider">TY HAGUPIT 哈格比颱風預測路徑</h1>
+            <p id="headerTime" class="text-xs text-gray-300">資料來源：中央氣象署 CWA (更新時間：載入中...)</p>
+        </div>
+        <div class="flex items-center gap-4">
+            <div class="hidden md:block text-sm font-semibold bg-red-600 px-3 py-1 rounded text-white tracking-wide shadow-md">
+                Taiwan Alerts 即時動態
+            </div>
+        </div>
+    </header>
+
+    <!-- 主視覺區塊 -->
+    <div class="relative w-full h-full flex-grow">
+        <div id="map"></div>
+
+        <!-- 全新設計的控制面板 (支援收合與字體縮放) -->
+        <div class="absolute top-4 right-4 bg-white/95 backdrop-blur shadow-2xl rounded-xl z-[1000] text-sm text-slate-700 w-72 border border-gray-200 transition-all flex flex-col overflow-hidden" id="mainControlPanel">
+            
+            <!-- 面板頂部標題列 (點擊可收合/展開面板) -->
+            <div class="flex justify-between items-center p-3 border-b border-gray-200 bg-slate-50 cursor-pointer hover:bg-slate-100 transition-colors" id="panelHeader">
+                <h3 class="font-bold text-slate-800 flex items-center gap-2 text-sm select-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4" /></svg>
+                    動態預測控制面板
+                </h3>
+                <div class="flex items-center gap-1">
+                    <!-- 字體自訂按鈕 -->
+                    <button id="btnTextDec" class="px-1.5 py-0.5 bg-white border border-slate-300 hover:bg-slate-200 rounded text-xs font-bold text-slate-600 transition-colors shadow-sm" title="縮小版面與字體">A-</button>
+                    <button id="btnTextInc" class="px-1.5 py-0.5 bg-white border border-slate-300 hover:bg-slate-200 rounded text-xs font-bold text-slate-600 transition-colors shadow-sm" title="放大版面與字體">A+</button>
+                    <div class="w-px h-4 bg-gray-300 mx-1"></div>
+                    <!-- 收合箭頭指標 -->
+                    <svg id="iconMinimize" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-slate-500 transform transition-transform duration-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" /></svg>
+                </div>
+            </div>
+
+            <!-- 面板主體內容 (收合時會隱藏此區塊) -->
+            <div id="panelBody" class="p-4 flex flex-col transition-all">
+                
+                <!-- XML 上傳區塊 -->
+                <!-- 線上即時報文 (CWA Open Data API) -->
+                <div class="mb-4 pb-4 border-b border-gray-200">
+                    <h3 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                        線上即時報文 (CWA)
+                    </h3>
+                    <button id="btnFetchCWA" class="w-full flex items-center justify-center gap-2 px-3 py-2 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs font-bold rounded-lg transition-all shadow-sm cursor-pointer">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                        <span id="btnFetchCWAText">讀取最新 CWA 報文</span>
+                    </button>
+                    <p id="fetchStatus" class="text-[10px] text-gray-400 mt-1.5 hidden"></p>
+                </div>
+
+                <!-- 手動上傳 XML 報文 -->
+                <div class="mb-4 pb-4 border-b border-gray-200">
+                    <h3 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                        手動上傳 XML 報文
+                    </h3>
+                    <input type="file" id="xmlFileInput" accept=".xml" class="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer"/>
+                    <p id="uploadStatus" class="text-[10px] text-gray-400 mt-1 hidden">解析成功！圖資已更新。</p>
+                </div>
+
+                <div class="flex flex-col gap-2">
+                    <!-- 70% 潛勢預測區 -->
+                    <button data-layer="prob" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-slate-100 text-slate-800 border border-slate-300 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-slate-100" data-active-text="text-slate-800" data-active-border="border-slate-300" data-dot="bg-white border-2 border-slate-400">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-white border-2 border-slate-400 indicator-dot transition-colors"></div>
+                            <span>70% 潛勢預測區</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <!-- 預測暴風圈 -->
+                    <button data-layer="fcstWind" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-orange-50 text-orange-700 border border-orange-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-orange-50" data-active-text="text-orange-700" data-active-border="border-orange-200" data-dot="bg-orange-500">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-orange-500 indicator-dot transition-colors"></div>
+                            <span>預測暴風圈 (7級)</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <!-- 目前暴風圈 -->
+                    <button data-layer="currWind" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-amber-50" data-active-text="text-amber-700" data-active-border="border-amber-200" data-dot="bg-amber-500">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-amber-500 indicator-dot transition-colors"></div>
+                            <span>目前暴風圈 (7級)</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <!-- 未來預測軌跡 -->
+                    <button data-layer="fcstTrack" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-yellow-50 text-yellow-700 border border-yellow-300 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-yellow-50" data-active-text="text-yellow-700" data-active-border="border-yellow-300" data-dot="bg-yellow-400">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-yellow-400 indicator-dot transition-colors"></div>
+                            <span>未來預測軌跡</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <!-- 過去歷史軌跡 -->
+                    <button data-layer="pastTrack" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-slate-50 text-slate-700 border border-slate-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-slate-50" data-active-text="text-slate-700" data-active-border="border-slate-200" data-dot="bg-slate-500">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-slate-500 indicator-dot transition-colors"></div>
+                            <span>過去歷史軌跡</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                </div>
+
+                <!-- Himawari 真實色衛星雲圖 -->
+                <div class="mt-3 pt-3 border-t border-gray-200">
+                    <h4 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-sky-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 7 7 0 10-12.768 5.74" /></svg>
+                        衛星雲圖
+                    </h4>
+                    <button data-layer="himawari" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-sky-50 text-sky-700 border border-sky-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-sky-50" data-active-text="text-sky-700" data-active-border="border-sky-200" data-dot="bg-sky-500">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-sky-500 indicator-dot transition-colors"></div>
+                            <span>Himawari 融合雲圖</span>
+                        </div>
+                        <span class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
+                    <div class="mt-2 flex items-center gap-2">
+                        <label for="himawariOpacity" class="text-[10px] text-slate-500 w-12 shrink-0">透明度</label>
+                        <input type="range" id="himawariOpacity" min="0" max="1" step="0.05" value="0.75" class="flex-1 h-1 accent-sky-500 cursor-pointer">
+                        <span id="himawariOpacityVal" class="text-[10px] text-slate-500 w-9 text-right">75%</span>
+                        <button id="btnRefreshHimawari" class="px-2 py-1 bg-white border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold text-slate-600 transition-colors shadow-sm" title="重新讀取最新 Himawari 融合雲圖">更新</button>
+                    </div>
+                    <p id="himawariStatus" class="text-[10px] text-gray-400 mt-1.5">正在讀取 JMA 最新融合雲圖...</p>
+                </div>
+
+                <!-- 暴風圈樣式自訂區塊 -->
+                <div class="mt-3 pt-3 border-t border-gray-200">
+                    <h4 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-orange-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" /></svg>
+                        暴風圈樣式設定
+                    </h4>
+                    <!-- 預測暴風圈設定 -->
+                    <div class="mb-2 p-2 bg-orange-50 rounded-lg border border-orange-100">
+                        <p class="text-[11px] font-bold text-orange-700 mb-1.5">預測暴風圈 (7級)</p>
+                        <div class="flex items-center gap-2 mb-1">
+                            <label class="text-[10px] text-slate-500 w-10 shrink-0">顏色</label>
+                            <input type="color" id="fcstWindColor" value="#d97706" class="w-6 h-6 rounded cursor-pointer border border-slate-200 p-0" title="邊框顏色">
+                            <input type="color" id="fcstWindFill" value="#f59e0b" class="w-6 h-6 rounded cursor-pointer border border-slate-200 p-0" title="填充顏色">
+                            <span class="text-[9px] text-slate-400">邊框 / 填充</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <label class="text-[10px] text-slate-500 w-10 shrink-0">粗細</label>
+                            <input type="range" id="fcstWindWeight" min="0.5" max="6" step="0.5" value="1.5" class="flex-1 h-1 accent-orange-500 cursor-pointer">
+                            <span id="fcstWindWeightVal" class="text-[10px] text-slate-500 w-8 text-right">1.5 px</span>
+                        </div>
+                    </div>
+                    <!-- 目前暴風圈設定 -->
+                    <div class="p-2 bg-amber-50 rounded-lg border border-amber-100">
+                        <p class="text-[11px] font-bold text-amber-700 mb-1.5">目前暴風圈 (7級)</p>
+                        <div class="flex items-center gap-2 mb-1">
+                            <label class="text-[10px] text-slate-500 w-10 shrink-0">顏色</label>
+                            <input type="color" id="currWindColor" value="#eab308" class="w-6 h-6 rounded cursor-pointer border border-slate-200 p-0" title="邊框顏色">
+                            <input type="color" id="currWindFill" value="#fcd34d" class="w-6 h-6 rounded cursor-pointer border border-slate-200 p-0" title="填充顏色">
+                            <span class="text-[9px] text-slate-400">邊框 / 填充</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <label class="text-[10px] text-slate-500 w-10 shrink-0">粗細</label>
+                            <input type="range" id="currWindWeight" min="0.5" max="6" step="0.5" value="2.5" class="flex-1 h-1 accent-amber-500 cursor-pointer">
+                            <span id="currWindWeightVal" class="text-[10px] text-slate-500 w-8 text-right">2.5 px</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 底圖切換區塊 -->
+                <div class="mt-4 pt-3 border-t border-gray-200">
+                    <h4 class="font-bold text-slate-800 mb-2 flex items-center gap-2 text-xs">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        地圖底圖樣式
+                    </h4>
+                    <select id="baseMapSelect" class="w-full bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 transition-colors cursor-pointer hover:bg-slate-100 font-medium">
+                        <option value="satellite">衛星影像 (預設)</option>
+                        <option value="topo">立體地形圖 (Topo)</option>
+                        <option value="dark">高對比深色</option>
+                        <option value="light">簡約淺色</option>
+                        <option value="osm">標準街道</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 初始化地圖與圖層群組
+        const map = L.map('map', { zoomControl: true, attributionControl: true });
+        map.setView([23.7, 121.0], 5);
+        
+        // 創建自訂地圖窗格 (Panes) 以確保圖層順序正確 (暴風圈與軌跡需在潛勢區之上)
+        map.createPane('himawariPane');
+        map.getPane('himawariPane').style.zIndex = 350;
+        map.getPane('himawariPane').style.pointerEvents = 'none';
+
+        map.createPane('coastlinePane');
+        map.getPane('coastlinePane').style.zIndex = 408;
+        map.getPane('coastlinePane').style.pointerEvents = 'none';
+
+        map.createPane('seaWarnPane');
+        map.getPane('seaWarnPane').style.zIndex = 405;
+
+        map.createPane('probPane');
+        map.getPane('probPane').style.zIndex = 410;
+
+        map.createPane('windPane');
+        map.getPane('windPane').style.zIndex = 420;
+
+        map.createPane('trackPane');
+        map.getPane('trackPane').style.zIndex = 430;
+        
+        const layerProbArea = L.layerGroup().addTo(map);
+        const layerFcstWind = L.layerGroup().addTo(map);
+        const layerCurrWind = L.layerGroup().addTo(map);
+        const layerFcstTrack = L.layerGroup().addTo(map);
+        const layerPastTrack = L.layerGroup().addTo(map);
+        const layerCenter = L.layerGroup().addTo(map);
+        const layerHimawari = L.layerGroup().addTo(map);
+
+        // 定義多種底圖樣式
+        const baseMaps = {
+            satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: '&copy; Esri' }),
+            topo: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: '&copy; Esri' }),
+            dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 20 }),
+            light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 20 }),
+            osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 })
+        };
+        let currentBaseMap = baseMaps.satellite;
+        currentBaseMap.addTo(map);
+
+        // 載入高精度海岸線
+        const coastlineLayer = L.layerGroup().addTo(map); 
+        fetch('https://unpkg.com/world-atlas@2/countries-10m.json')
+            .then(res => res.json())
+            .then(topology => {
+                const geojson = topojson.feature(topology, topology.objects.countries);
+                L.geoJSON(geojson, {
+                    interactive: false,
+                    pane: 'coastlinePane',
+                    style: f => (f.id === '158' || f.id === 158 || (f.properties && f.properties.name === 'Taiwan')) 
+                        ? { color: '#fbbf24', weight: 4, fill: false, opacity: 1 }
+                        : { color: '#f3f4f6', weight: 2, fill: false, opacity: 0.7 }
+                }).addTo(coastlineLayer);
+            });
+
+
+
+        // 格式化日期函數 (ISO 轉 MM/DD HH:mm)
+        function formatCWADate(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        }
+
+        // --- 核心幾何演算法：使用 Turf.js 計算完美的 70% 潛勢平滑包絡線 ---
+        function computeTurfRibbon(pathLatLon, radiiKm) {
+            let polys = [];
+            
+            // 1. 產生各節點的圓形
+            for (let i = 0; i < pathLatLon.length; i++) {
+                let r = radiiKm[i];
+                let pt = [pathLatLon[i][1], pathLatLon[i][0]]; // Turf 使用 [lon, lat] 格式
+                if (r > 0) {
+                    // 加入 64 個頂點讓圓形極度平滑
+                    polys.push(turf.circle(pt, r, {steps: 64, units: 'kilometers'}));
+                }
+            }
+
+            // 2. 產生各相鄰節點之間的外切梯形 (完美連接兩個圓的邊界)
+            for (let i = 0; i < pathLatLon.length - 1; i++) {
+                let p1 = [pathLatLon[i][1], pathLatLon[i][0]];
+                let p2 = [pathLatLon[i+1][1], pathLatLon[i+1][0]];
+                let r1 = radiiKm[i] || 0;
+                let r2 = radiiKm[i+1] || 0;
+
+                let d = turf.distance(p1, p2, {units: 'kilometers'});
+                // 若兩點距離為 0，或其中一個圓完全包覆另一個圓，則無需繪製切線梯形
+                if (d <= Math.abs(r2 - r1) || d === 0) continue; 
+
+                let brng = turf.bearing(p1, p2);
+                let alpha = Math.asin((r2 - r1) / d) * (180 / Math.PI);
+
+                // 計算四個外切點；若半徑為 0 (如最初的中心點)，則自動成為銳角尖端
+                let t1L = r1 > 0 ? turf.destination(p1, r1, brng - 90 - alpha, {units: 'kilometers'}).geometry.coordinates : p1;
+                let t1R = r1 > 0 ? turf.destination(p1, r1, brng + 90 + alpha, {units: 'kilometers'}).geometry.coordinates : p1;
+                let t2L = r2 > 0 ? turf.destination(p2, r2, brng - 90 - alpha, {units: 'kilometers'}).geometry.coordinates : p2;
+                let t2R = r2 > 0 ? turf.destination(p2, r2, brng + 90 + alpha, {units: 'kilometers'}).geometry.coordinates : p2;
+
+                let trap = turf.polygon([[t1L, t2L, t2R, t1R, t1L]]);
+                polys.push(trap);
+            }
+
+            if (polys.length === 0) return null;
+            
+            // 3. 將所有圓與梯形「聯集」，產生單一且外框絕對平滑的多邊形
+            let envelope = polys[0];
+            for (let i = 1; i < polys.length; i++) {
+                envelope = turf.union(envelope, polys[i]);
+            }
+            return envelope; 
+        }
+
+        // 核心解析與繪圖邏輯
+        function updateTyphoonFromXML(xmlDoc) {
+            try {
+                // 清空現有圖層
+                layerProbArea.clearLayers();
+                layerFcstWind.clearLayers();
+                layerCurrWind.clearLayers();
+                layerFcstTrack.clearLayers();
+                layerPastTrack.clearLayers();
+                layerCenter.clearLayers();
+
+                // 解析基本資訊
+                const cwaTyName = xmlDoc.getElementsByTagName("CwaTyphoonName")[0]?.textContent || "";
+                const tyName = xmlDoc.getElementsByTagName("TyphoonName")[0]?.textContent || "";
+                const tdNo = xmlDoc.getElementsByTagName("CwaTdNo")[0]?.textContent || "";
+                const displayName = cwaTyName ? `${cwaTyName} (${tyName})` : `熱帶性低氣壓 TD${tdNo}`;
+                const titlePrefix = cwaTyName ? `TY ${tyName} ${cwaTyName}颱風` : `TD${tdNo} 熱帶性低氣壓`;
+                
+                // 解析過去路徑
+                const analysisFixes = Array.from(xmlDoc.getElementsByTagName("AnalysisData")[0]?.getElementsByTagName("Fix") || []);
+                const pastPath = [];
+                let lastPressure = "";
+                let lastDateIso = "";
+                let last15msRadius = 0;
+
+                analysisFixes.forEach(fix => {
+                    const lat = parseFloat(fix.getElementsByTagName("CoordinateLatitude")[0]?.textContent);
+                    const lon = parseFloat(fix.getElementsByTagName("CoordinateLongitude")[0]?.textContent);
+                    pastPath.push([lat, lon]);
+                    
+                    lastDateIso = fix.getElementsByTagName("DateTime")[0]?.textContent;
+                    lastPressure = fix.getElementsByTagName("Pressure")[0]?.textContent;
+                    
+                    const circle15 = fix.getElementsByTagName("Circle15ms")[0];
+                    if (circle15 && circle15.getElementsByTagName("Radius").length > 0) {
+                        last15msRadius = parseFloat(circle15.getElementsByTagName("Radius")[0]?.textContent);
+                    } else {
+                        last15msRadius = 0;
+                    }
+                });
+
+                // 更新 UI 標題
+                document.getElementById('headerTitle').innerText = `${titlePrefix}預測路徑`;
+                document.getElementById('headerTime').innerText = `資料來源：中央氣象署 CWA (更新時間：${formatCWADate(lastDateIso)} CST)`;
+
+                // 解析未來預測路徑
+                const forecastFixes = Array.from(xmlDoc.getElementsByTagName("ForecastData")[0]?.getElementsByTagName("Fix") || []);
+                const fcstPath = [];
+                const probRadii_km = [];
+                const fcstDateLabels = {};
+                
+                // 將最新的觀測點作為預測起點，並將半徑設為 0 以達成「往中心匯集」的視覺效果
+                if (pastPath.length > 0) {
+                    fcstPath.push(pastPath[pastPath.length - 1]);
+                    probRadii_km.push(0);
+                }
+
+                forecastFixes.forEach((fix, index) => {
+                    const lat = parseFloat(fix.getElementsByTagName("CoordinateLatitude")[0]?.textContent);
+                    const lon = parseFloat(fix.getElementsByTagName("CoordinateLongitude")[0]?.textContent);
+                    fcstPath.push([lat, lon]);
+
+                    // 解析 70% 預測機率半徑資料
+                    const probRadius = parseFloat(fix.getElementsByTagName("Radius70PercentProbability")[0]?.textContent) || 0;
+                    probRadii_km.push(probRadius);
+
+                    const point = [lat, lon];
+                    const actualIdx = index + 1; 
+
+                    // 繪製預測七級風暴風圈
+                    let f_15msRadius = 0;
+                    const f_circle15 = fix.getElementsByTagName("Circle15ms")[0];
+                    if (f_circle15 && f_circle15.getElementsByTagName("Radius").length > 0) {
+                        f_15msRadius = parseFloat(f_circle15.getElementsByTagName("Radius")[0]?.textContent);
+                    }
+                    if (f_15msRadius > 0) {
+                        L.circle(point, {
+                            pane: 'windPane',
+                            radius: f_15msRadius * 1000, color: windStyle.fcst.color, weight: windStyle.fcst.weight, 
+                            fill: true, fillColor: windStyle.fcst.fillColor, fillOpacity: 0.15     
+                        }).addTo(layerFcstWind);
+                    }
+
+                    // 計算時間標籤 (每隔 24 小時的報次標註一次)
+                    const forecastHour = parseInt(fix.getElementsByTagName("ForecastHour")[0]?.textContent || "0");
+                    if (forecastHour > 0 && forecastHour % 24 === 0) {
+                        const initTime = new Date(fix.getElementsByTagName("InitialTime")[0].textContent);
+                        initTime.setHours(initTime.getHours() + forecastHour);
+                        
+                        // 格式化為：MM/DD HH:mm (24小時制，補零)
+                        const month = String(initTime.getMonth() + 1).padStart(2, '0');
+                        const day = String(initTime.getDate()).padStart(2, '0');
+                        const hours = String(initTime.getHours()).padStart(2, '0');
+                        const minutes = String(initTime.getMinutes()).padStart(2, '0');
+                        fcstDateLabels[actualIdx] = `${month}/${day} ${hours}:${minutes}`;
+                    }
+                });
+
+                // 1. 繪製 70% 潛勢預測區 (透過 Turf.js 聯集出無雜訊的平滑包絡線)
+                const envelopeGeoJSON = computeTurfRibbon(fcstPath, probRadii_km);
+                if (envelopeGeoJSON) {
+                    L.geoJSON(envelopeGeoJSON, {
+                        pane: 'probPane',
+                        style: function() {
+                            return {
+                                color: '#ffffff', 
+                                weight: 2, 
+                                dashArray: '6, 6', 
+                                fill: true, 
+                                fillColor: 'url(#diagonalHatch)', 
+                                fillOpacity: 1
+                            };
+                        },
+                        interactive: false
+                    }).addTo(layerProbArea);
+                }
+
+                // 2. 繪製目前七級風暴風半徑 (目前位置邊框略粗)
+                if (last15msRadius > 0 && pastPath.length > 0) {
+                    L.circle(pastPath[pastPath.length - 1], {
+                        pane: 'windPane',
+                        radius: last15msRadius * 1000, color: windStyle.curr.color, weight: windStyle.curr.weight,
+                        fill: true, fillColor: windStyle.curr.fillColor, fillOpacity: 0.25
+                    }).addTo(layerCurrWind);
+                }
+
+                // 3. 繪製軌跡線
+                if (pastPath.length > 0) {
+                    L.polyline(pastPath, { pane: 'trackPane', color: '#cbd5e1', weight: 2, opacity: 0.9 }).addTo(layerPastTrack);
+                }
+                if (fcstPath.length > 1) {
+                    L.polyline(fcstPath, { pane: 'trackPane', color: '#fde047', weight: 3.5, dashArray: '8, 8', opacity: 1 }).addTo(layerFcstTrack);
+                }
+
+                // 4. 標記歷史與中心節點
+                pastPath.forEach((pt, idx) => {
+                    if (idx === pastPath.length - 1) {
+                        L.circleMarker(pt, { pane: 'trackPane', radius: 7, color: '#ffffff', weight: 2, fill: true, fillColor: '#ef4444', fillOpacity: 1 })
+                            .addTo(layerCenter)
+                            .bindTooltip(`${formatCWADate(lastDateIso)}<br>${displayName}<br>中心氣壓 ${lastPressure} hPa`, {
+                                permanent: true, direction: 'right', className: 'custom-tooltip'
+                            });
+                    } else {
+                        L.circleMarker(pt, { pane: 'trackPane', radius: 3, color: '#ffffff', weight: 1, fill: true, fillColor: '#64748b', fillOpacity: 1 }).addTo(layerPastTrack);
+                    }
+                });
+
+                // 未來預測節點與日期標籤
+                fcstPath.slice(1).forEach((pt, idx) => {
+                    const actualIdx = idx + 1;
+                    const marker = L.circleMarker(pt, { pane: 'trackPane', radius: 4.5, color: '#fde047', weight: 2, fill: true, fillColor: '#ffffff', fillOpacity: 1 }).addTo(layerFcstTrack);
+                    
+                    if (fcstDateLabels[actualIdx]) {
+                        marker.bindTooltip(fcstDateLabels[actualIdx], {
+                            permanent: true, 
+                            direction: 'top', 
+                            className: 'fcst-date-tooltip', 
+                            offset: [0, -8] // 向上偏移以實現線條對齊膠囊底部的視覺效果
+                        });
+                    }
+                });
+
+                // 自動平移與縮放視角 (找出所有點的邊界)
+                const allPoints = pastPath.concat(fcstPath);
+                if (allPoints.length > 0) {
+                    map.fitBounds(L.polyline(allPoints).getBounds(), { padding: [50, 50] });
+                }
+
+                // 資料載入後延遲調整標籤位置以防止重疊
+                setTimeout(adjustTooltipPositions, 250);
+
+            } catch (error) {
+                console.error("解析 XML 失敗", error);
+                alert("無法解析上傳的檔案，請確認是否為中央氣象署的 CWA-TropicalCyclone XML 格式。");
+            }
+        }
+
+        // 加入比例尺
+        L.control.scale({ imperial: false, position: 'bottomleft' }).addTo(map);
+
+        // ==========================================
+        // UI 事件監聽與控制邏輯
+        // ==========================================
+        
+        // 1. 面板收合與字體大小縮放邏輯
+        const panelHeader = document.getElementById('panelHeader');
+        const panelBody = document.getElementById('panelBody');
+        const iconMinimize = document.getElementById('iconMinimize');
+        const btnTextInc = document.getElementById('btnTextInc');
+        const btnTextDec = document.getElementById('btnTextDec');
+        let isPanelMinimized = false;
+        let currentZoomPercent = 100;
+
+        // 點擊頂部標題列收合/展開
+        panelHeader.addEventListener('click', () => {
+            isPanelMinimized = !isPanelMinimized;
+            if (isPanelMinimized) {
+                panelBody.classList.add('hidden');
+                iconMinimize.classList.add('rotate-180');
+            } else {
+                panelBody.classList.remove('hidden');
+                iconMinimize.classList.remove('rotate-180');
+            }
+        });
+
+        // 放大字體與版面
+        btnTextInc.addEventListener('click', (e) => {
+            e.stopPropagation(); // 阻止事件冒泡以免觸發面板收合
+            if (currentZoomPercent < 150) {
+                currentZoomPercent += 10;
+                document.documentElement.style.fontSize = currentZoomPercent + '%';
+            }
+        });
+
+        // 縮小字體與版面
+        btnTextDec.addEventListener('click', (e) => {
+            e.stopPropagation(); 
+            if (currentZoomPercent > 70) {
+                currentZoomPercent -= 10;
+                document.documentElement.style.fontSize = currentZoomPercent + '%';
+            }
+        });
+
+        // 2. 檔案上傳解析功能
+        document.getElementById('xmlFileInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const xmlText = e.target.result;
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+                updateTyphoonFromXML(xmlDoc);
+                
+                const statusTxt = document.getElementById('uploadStatus');
+                statusTxt.classList.remove('hidden');
+                setTimeout(() => statusTxt.classList.add('hidden'), 3000);
+            };
+            reader.readAsText(file);
+        });
+
+        // 3. 圖層開關控制
+        const layerMap = { 'prob': layerProbArea, 'fcstWind': layerFcstWind, 'currWind': layerCurrWind, 'fcstTrack': layerFcstTrack, 'pastTrack': layerPastTrack, 'himawari': layerHimawari };
+        document.querySelectorAll('.layer-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const layerKey = this.getAttribute('data-layer');
+                const layer = layerMap[layerKey];
+                const activeBg = this.getAttribute('data-active-bg');
+                const activeText = this.getAttribute('data-active-text');
+                const activeBorder = this.getAttribute('data-active-border');
+                const dotColorString = this.getAttribute('data-dot');
+                const dot = this.querySelector('.indicator-dot');
+                const statusText = this.querySelector('.status-text');
+
+                if (map.hasLayer(layer)) {
+                    map.removeLayer(layer);
+                    this.classList.remove(activeBg, activeText, activeBorder, 'shadow-sm');
+                    this.classList.add('bg-slate-800/60', 'text-gray-400', 'border-transparent');
+                    dot.className = 'w-3 h-3 rounded-full indicator-dot transition-colors bg-gray-500';
+                    statusText.innerText = '隱藏';
+                } else {
+                    map.addLayer(layer);
+                    this.classList.remove('bg-slate-800/60', 'text-gray-400', 'border-transparent');
+                    this.classList.add(activeBg, activeText, activeBorder, 'shadow-sm');
+                    dot.className = `w-3 h-3 rounded-full indicator-dot transition-colors ${dotColorString}`;
+                    statusText.innerText = '顯示';
+                }
+            });
+        });
+
+        // 4. 底圖切換邏輯
+        document.getElementById('baseMapSelect').addEventListener('change', function(e) {
+            const selectedMap = e.target.value;
+            map.removeLayer(currentBaseMap);
+            currentBaseMap = baseMaps[selectedMap];
+            currentBaseMap.addTo(map);
+            if (selectedMap === 'satellite' || selectedMap === 'dark' || selectedMap === 'topo') {
+                if (!map.hasLayer(coastlineLayer)) map.addLayer(coastlineLayer);
+            } else {
+                if (map.hasLayer(coastlineLayer)) map.removeLayer(coastlineLayer);
+            }
+        });
+
+        // ==========================================
+        // 暴風圈樣式自訂邏輯
+        // ==========================================
+        const windStyle = {
+            fcst: { color: '#d97706', fillColor: '#f59e0b', weight: 1 },
+            curr: { color: '#eab308', fillColor: '#fcd34d', weight: 2 }
+        };
+
+        // 滑桿即時更新顯示數值
+        document.getElementById('fcstWindWeight').addEventListener('input', function() {
+            document.getElementById('fcstWindWeightVal').textContent = this.value + ' px';
+        });
+        document.getElementById('currWindWeight').addEventListener('input', function() {
+            document.getElementById('currWindWeightVal').textContent = this.value + ' px';
+        });
+
+        // 統一的「套用樣式並重繪暴風圈」函數
+        function applyWindStyleAndRedraw() {
+            windStyle.fcst.color = document.getElementById('fcstWindColor').value;
+            windStyle.fcst.fillColor = document.getElementById('fcstWindFill').value;
+            windStyle.fcst.weight = parseFloat(document.getElementById('fcstWindWeight').value);
+            windStyle.curr.color = document.getElementById('currWindColor').value;
+            windStyle.curr.fillColor = document.getElementById('currWindFill').value;
+            windStyle.curr.weight = parseFloat(document.getElementById('currWindWeight').value);
+
+            // 即時更新已繪製的圓的樣式，無需重新解析 XML
+            layerFcstWind.eachLayer(function(layer) {
+                if (layer instanceof L.Circle) {
+                    layer.setStyle({
+                        color: windStyle.fcst.color,
+                        fillColor: windStyle.fcst.fillColor,
+                        weight: windStyle.fcst.weight
+                    });
+                }
+            });
+            layerCurrWind.eachLayer(function(layer) {
+                if (layer instanceof L.Circle) {
+                    layer.setStyle({
+                        color: windStyle.curr.color,
+                        fillColor: windStyle.curr.fillColor,
+                        weight: windStyle.curr.weight
+                    });
+                }
+            });
+        }
+
+        // 監聽所有暴風圈樣式控制項的變更事件
+        ['fcstWindColor', 'fcstWindFill', 'fcstWindWeight', 'currWindColor', 'currWindFill', 'currWindWeight'].forEach(id => {
+            document.getElementById(id).addEventListener('input', applyWindStyleAndRedraw);
+        });
+
+        // ==========================================
+        // Himawari 真實色 + 紅外線融合衛星雲圖讀取邏輯
+        // ==========================================
+        const HIMAWARI_TARGET_TIMES_URL = 'https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json';
+        const HIMAWARI_TILE_BASE_URL = 'https://www.jma.go.jp/bosai/himawari/data/satimg';
+        const HIMAWARI_TRUE_COLOR_PATH = 'REP/ETC';
+        const HIMAWARI_INFRARED_PATH = 'B13/TBB';
+        const HIMAWARI_PRODUCT_LABEL = '真實色 + 紅外線融合';
+        const HIMAWARI_TARGET_TIME_SOURCES = [
+            HIMAWARI_TARGET_TIMES_URL,
+            `https://api.allorigins.win/raw?url=${encodeURIComponent(HIMAWARI_TARGET_TIMES_URL)}`,
+            `https://corsproxy.io/?${encodeURIComponent(HIMAWARI_TARGET_TIMES_URL)}`
+        ];
+        let himawariTileLayer = null;
+        let himawariLatestKey = '';
+        let himawariOpacity = 0.75;
+        const HIMAWARI_NATIVE_MIN_ZOOM = 3;
+        const HIMAWARI_NATIVE_MAX_ZOOM = 5;
+        const CLOUD_ALPHA_START = 30;
+        const CLOUD_ALPHA_FULL = 188;
+        const CLOUD_ALPHA_MAX = 244;
+        const CLOUD_CHROMA_LIMIT = 92;
+        const CLOUD_CONTRAST = 1.32;
+        const CLOUD_TEXTURE_STRENGTH = 3.2;
+        const CLOUD_FINE_ALPHA_GAIN = 1.15;
+        const CLOUD_BRIGHTNESS_BOOST = 8;
+        const CLOUD_HIGHLIGHT_START = 168;
+        const CLOUD_HIGHLIGHT_RANGE = 74;
+        const CLOUD_HIGHLIGHT_COMPRESSION = 0.48;
+        const INFRARED_ALPHA_START = 22;
+        const INFRARED_ALPHA_FULL = 152;
+        const INFRARED_TONE_STRENGTH = 0.42;
+        const TRUE_COLOR_STRENGTH = 0.48;
+        const HIMAWARI_RENDER_SCALE = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+
+        function pickLatestHimawariTime(targetTimes) {
+            return targetTimes
+                .filter(item => item && item.basetime && item.validtime)
+                .sort((a, b) => a.validtime.localeCompare(b.validtime))
+                .at(-1);
+        }
+
+        function formatJMATimeForTaiwan(jmaTimeText) {
+            if (!/^\d{14}$/.test(jmaTimeText || '')) return '未知時間';
+            const y = Number(jmaTimeText.slice(0, 4));
+            const m = Number(jmaTimeText.slice(4, 6)) - 1;
+            const d = Number(jmaTimeText.slice(6, 8));
+            const hh = Number(jmaTimeText.slice(8, 10));
+            const mm = Number(jmaTimeText.slice(10, 12));
+            const date = new Date(Date.UTC(y, m, d, hh, mm));
+
+            return new Intl.DateTimeFormat('zh-TW', {
+                timeZone: 'Asia/Taipei',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            }).format(date);
+        }
+
+        function setHimawariStatus(text, colorClass = 'text-gray-400') {
+            const statusEl = document.getElementById('himawariStatus');
+            statusEl.textContent = text;
+            statusEl.className = `text-[10px] ${colorClass} mt-1.5`;
+        }
+
+        function getHimawariTileUrl(targetTime, coords, productPath) {
+            return `${HIMAWARI_TILE_BASE_URL}/${targetTime.basetime}/fd/${targetTime.validtime}/${productPath}/${coords.z}/${coords.x}/${coords.y}.jpg`;
+        }
+
+        function getHimawariSourceTile(targetTime, coords, productPath) {
+            const sourceZoom = Math.max(HIMAWARI_NATIVE_MIN_ZOOM, Math.min(HIMAWARI_NATIVE_MAX_ZOOM, coords.z));
+            const overzoomFactor = Math.pow(2, Math.max(0, coords.z - sourceZoom));
+            const sourceX = Math.floor(coords.x / overzoomFactor);
+            const sourceY = Math.floor(coords.y / overzoomFactor);
+            const cropSize = 256 / overzoomFactor;
+            const cropX = (coords.x % overzoomFactor) * cropSize;
+            const cropY = (coords.y % overzoomFactor) * cropSize;
+
+            return {
+                url: getHimawariTileUrl(targetTime, { z: sourceZoom, x: sourceX, y: sourceY }, productPath),
+                cropX,
+                cropY,
+                cropSize
+            };
+        }
+
+        function smoothstep(value) {
+            const t = Math.max(0, Math.min(1, value));
+            return t * t * (3 - 2 * t);
+        }
+
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(max, value));
+        }
+
+        function createRenderCanvas(width, height) {
+            const renderCanvas = document.createElement('canvas');
+            renderCanvas.width = width;
+            renderCanvas.height = height;
+            return renderCanvas;
+        }
+
+        function loadHimawariImage(url) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.decoding = 'async';
+                img.onload = () => resolve(img);
+                img.onerror = () => reject(new Error(`無法載入圖磚：${url}`));
+                img.src = url;
+            });
+        }
+
+        function drawSourceToCanvas(targetTime, coords, productPath, width, height) {
+            return loadHimawariImage(getHimawariSourceTile(targetTime, coords, productPath).url)
+                .then(img => {
+                    const sourceTile = getHimawariSourceTile(targetTime, coords, productPath);
+                    const renderCanvas = createRenderCanvas(width, height);
+                    const renderCtx = renderCanvas.getContext('2d', { willReadFrequently: true });
+                    const scaleX = img.naturalWidth / 256;
+                    const scaleY = img.naturalHeight / 256;
+
+                    renderCtx.imageSmoothingEnabled = true;
+                    renderCtx.imageSmoothingQuality = 'high';
+                    renderCtx.drawImage(
+                        img,
+                        sourceTile.cropX * scaleX,
+                        sourceTile.cropY * scaleY,
+                        sourceTile.cropSize * scaleX,
+                        sourceTile.cropSize * scaleY,
+                        0,
+                        0,
+                        width,
+                        height
+                    );
+
+                    return renderCtx.getImageData(0, 0, width, height);
+                });
+        }
+
+        function applyHybridCloudMask(ctx, trueColorImageData, infraredImageData, width, height) {
+            const trueData = trueColorImageData?.data || null;
+            const irData = infraredImageData?.data || null;
+            const output = ctx.createImageData(width, height);
+            const outData = output.data;
+            const trueLumaMap = new Float32Array(width * height);
+            const irLumaMap = new Float32Array(width * height);
+            const whitenessMap = new Float32Array(width * height);
+
+            for (let i = 0, p = 0; i < outData.length; i += 4, p++) {
+                const r = trueData ? trueData[i] : 0;
+                const g = trueData ? trueData[i + 1] : 0;
+                const b = trueData ? trueData[i + 2] : 0;
+                const maxChannel = Math.max(r, g, b);
+                const minChannel = Math.min(r, g, b);
+                const chroma = maxChannel - minChannel;
+
+                trueLumaMap[p] = r * 0.299 + g * 0.587 + b * 0.114;
+                irLumaMap[p] = irData
+                    ? irData[i] * 0.299 + irData[i + 1] * 0.587 + irData[i + 2] * 0.114
+                    : trueLumaMap[p];
+                whitenessMap[p] = Math.max(0, Math.min(1, 1 - chroma / CLOUD_CHROMA_LIMIT));
+            }
+
+            for (let y = 0; y < height; y++) {
+                const row = y * width;
+                const rowAbove = Math.max(0, y - 1) * width;
+                const rowBelow = Math.min(height - 1, y + 1) * width;
+
+                for (let x = 0; x < width; x++) {
+                    const p = row + x;
+                    const i = p * 4;
+                    const left = row + Math.max(0, x - 1);
+                    const right = row + Math.min(width - 1, x + 1);
+                    const luma = trueLumaMap[p];
+                    const irLuma = irLumaMap[p];
+                    const whiteness = whitenessMap[p];
+                    const localMean = (
+                        luma * 4 +
+                        trueLumaMap[left] +
+                        trueLumaMap[right] +
+                        trueLumaMap[rowAbove + x] +
+                        trueLumaMap[rowBelow + x]
+                    ) / 8;
+                    const localMeanDiagonal = (
+                        localMean * 2 +
+                        trueLumaMap[rowAbove + Math.max(0, x - 1)] +
+                        trueLumaMap[rowAbove + Math.min(width - 1, x + 1)] +
+                        trueLumaMap[rowBelow + Math.max(0, x - 1)] +
+                        trueLumaMap[rowBelow + Math.min(width - 1, x + 1)]
+                    ) / 6;
+                    const irLocalMean = (
+                        irLuma * 4 +
+                        irLumaMap[left] +
+                        irLumaMap[right] +
+                        irLumaMap[rowAbove + x] +
+                        irLumaMap[rowBelow + x]
+                    ) / 8;
+                    const localTexture = luma - localMean;
+                    const fineTexture = luma - localMeanDiagonal;
+                    const irTexture = irLuma - irLocalMean;
+                    const contrastedLuma = 128 + (luma - 128) * CLOUD_CONTRAST;
+                    const texturedLuma = Math.max(0, Math.min(255, contrastedLuma + localTexture * CLOUD_TEXTURE_STRENGTH + fineTexture * 1.15));
+                    const chromaPenalty = 1 - whiteness;
+                    const cloudThreshold = CLOUD_ALPHA_START + chromaPenalty * 58;
+                    const normalized = Math.max(0, Math.min(1, (luma - cloudThreshold) / (CLOUD_ALPHA_FULL - cloudThreshold)));
+                    const smoothAlpha = smoothstep(normalized);
+                    const irAlpha = smoothstep((irLuma - INFRARED_ALPHA_START) / (INFRARED_ALPHA_FULL - INFRARED_ALPHA_START));
+                    const fineCloudBoost = Math.max(0, fineTexture + 5) * CLOUD_FINE_ALPHA_GAIN * (0.35 + whiteness * 0.65);
+                    const alphaBoost = Math.max(0, localTexture) * 0.48 * (0.25 + whiteness * 0.75) + fineCloudBoost;
+                    const cloudAlphaBase = CLOUD_ALPHA_MAX * smoothAlpha * (0.18 + whiteness * 0.82);
+                    const irAlphaBoost = Math.max(0, irTexture + 4) * 0.8;
+                    const trueAlpha = cloudAlphaBase + alphaBoost;
+                    const infraredAlpha = CLOUD_ALPHA_MAX * irAlpha + irAlphaBoost;
+                    const highlightLevel = smoothstep((Math.max(luma, irLuma) - CLOUD_HIGHLIGHT_START) / CLOUD_HIGHLIGHT_RANGE);
+                    const combinedTexture = localTexture * 0.55 + fineTexture * 0.85 + irTexture * 0.72;
+                    const textureCarve = clamp(combinedTexture * (1.05 + highlightLevel * 1.35), -42, 38);
+                    const alpha = Math.round(clamp(
+                        Math.max(trueAlpha * 0.72, infraredAlpha * 0.92) * (1 - highlightLevel * 0.08) + Math.max(0, combinedTexture) * 0.58 + smoothAlpha * 18,
+                        0,
+                        248
+                    ));
+                    const detailBoost = (texturedLuma - luma) * 0.36 + CLOUD_BRIGHTNESS_BOOST * (1 - highlightLevel * 0.55);
+                    const irTone = clamp(52 + (128 + (irLuma - 128) * 1.18 + irTexture * 2.15) * 0.76, 0, 245);
+                    const trueR = trueData ? trueData[i] : irTone;
+                    const trueG = trueData ? trueData[i + 1] : irTone;
+                    const trueB = trueData ? trueData[i + 2] : irTone;
+                    const trueVisibleWeight = Math.max(0, Math.min(TRUE_COLOR_STRENGTH, smoothAlpha * TRUE_COLOR_STRENGTH));
+                    const irWeight = Math.max(0.34, Math.min(0.76, irAlpha * INFRARED_TONE_STRENGTH + 0.34));
+                    const totalWeight = Math.max(0.01, trueVisibleWeight + irWeight);
+                    const baseCloudR = (trueR * trueVisibleWeight + irTone * irWeight) / totalWeight;
+                    const baseCloudG = (trueG * trueVisibleWeight + irTone * irWeight) / totalWeight;
+                    const baseCloudB = (trueB * trueVisibleWeight + Math.min(255, irTone + 4) * irWeight) / totalWeight;
+                    const rawR = baseCloudR + detailBoost * 0.32 + textureCarve;
+                    const rawG = baseCloudG + detailBoost * 0.32 + textureCarve;
+                    const rawB = baseCloudB + detailBoost * 0.36 + textureCarve;
+                    const compressR = Math.max(0, rawR - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+                    const compressG = Math.max(0, rawG - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+                    const compressB = Math.max(0, rawB - CLOUD_HIGHLIGHT_START) * CLOUD_HIGHLIGHT_COMPRESSION * highlightLevel;
+
+                    outData[i] = clamp(rawR - compressR, 0, 240);
+                    outData[i + 1] = clamp(rawG - compressG, 0, 240);
+                    outData[i + 2] = clamp(rawB - compressB, 0, 244);
+                    outData[i + 3] = alpha;
+                }
+            }
+
+            ctx.putImageData(output, 0, 0);
+        }
+
+        function createHimawariTileLayer(targetTime) {
+            const gridLayer = L.gridLayer({
+                pane: 'himawariPane',
+                minZoom: HIMAWARI_NATIVE_MIN_ZOOM,
+                maxZoom: 19,
+                opacity: himawariOpacity,
+                tileSize: 256,
+                className: 'himawari-ir-tile',
+                attribution: `Himawari-8/9 ${HIMAWARI_PRODUCT_LABEL} imagery: JMA`
+            });
+
+            gridLayer.createTile = function(coords, done) {
+                const size = this.getTileSize();
+                const canvas = L.DomUtil.create('canvas', 'leaflet-tile himawari-ir-tile');
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                const renderWidth = Math.round(size.x * HIMAWARI_RENDER_SCALE);
+                const renderHeight = Math.round(size.y * HIMAWARI_RENDER_SCALE);
+
+                canvas.width = renderWidth;
+                canvas.height = renderHeight;
+                canvas.style.width = `${size.x}px`;
+                canvas.style.height = `${size.y}px`;
+                canvas.style.background = 'transparent';
+
+                Promise.allSettled([
+                    drawSourceToCanvas(targetTime, coords, HIMAWARI_TRUE_COLOR_PATH, renderWidth, renderHeight),
+                    drawSourceToCanvas(targetTime, coords, HIMAWARI_INFRARED_PATH, renderWidth, renderHeight)
+                ]).then(results => {
+                    const trueColorImageData = results[0].status === 'fulfilled' ? results[0].value : null;
+                    const infraredImageData = results[1].status === 'fulfilled' ? results[1].value : null;
+
+                    try {
+                        if (!trueColorImageData && !infraredImageData) {
+                            throw new Error('真實色與紅外線圖磚皆無法載入');
+                        }
+
+                        applyHybridCloudMask(ctx, trueColorImageData, infraredImageData, renderWidth, renderHeight);
+                        done(null, canvas);
+                    } catch (err) {
+                        console.warn('Himawari hybrid cloud processing failed:', err);
+                        done(null, canvas);
+                    }
+                });
+
+                return canvas;
+            };
+
+            return gridLayer;
+        }
+
+        async function fetchHimawariTargetTimes() {
+            let lastError = null;
+
+            for (const sourceUrl of HIMAWARI_TARGET_TIME_SOURCES) {
+                try {
+                    const response = await fetch(sourceUrl, {
+                        cache: 'no-store',
+                        signal: AbortSignal.timeout(15000)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+
+                    const targetTimes = await response.json();
+                    if (!Array.isArray(targetTimes)) {
+                        throw new Error('影像時間清單格式不正確');
+                    }
+
+                    return targetTimes;
+                } catch (err) {
+                    lastError = err;
+                }
+            }
+
+            throw lastError || new Error('無法讀取 Himawari 影像時間清單');
+        }
+
+        async function loadLatestHimawariLayer({ silent = false } = {}) {
+            if (!silent) {
+                setHimawariStatus('正在讀取 JMA 最新融合雲圖...', 'text-blue-500');
+            }
+
+            try {
+                const targetTimes = await fetchHimawariTargetTimes();
+                const latest = pickLatestHimawariTime(targetTimes);
+
+                if (!latest) {
+                    throw new Error('JMA 未回傳可用影像時間');
+                }
+
+                const latestKey = `${latest.basetime}_${latest.validtime}`;
+                const displayTime = formatJMATimeForTaiwan(latest.validtime);
+
+                if (latestKey !== himawariLatestKey || !himawariTileLayer) {
+                    if (himawariTileLayer) {
+                        layerHimawari.removeLayer(himawariTileLayer);
+                    }
+                    himawariTileLayer = createHimawariTileLayer(latest);
+                    layerHimawari.addLayer(himawariTileLayer);
+                    himawariLatestKey = latestKey;
+                }
+
+                setHimawariStatus(`最新 Himawari 透明融合雲圖：${displayTime} 台灣時間`, 'text-emerald-600 font-semibold');
+            } catch (err) {
+                console.warn('Himawari layer fetch failed:', err);
+                setHimawariStatus(`Himawari 雲圖讀取失敗：${err.message || '未知錯誤'}`, 'text-red-500 font-semibold');
+            }
+        }
+
+        document.getElementById('himawariOpacity').addEventListener('input', function() {
+            himawariOpacity = parseFloat(this.value);
+            document.getElementById('himawariOpacityVal').textContent = `${Math.round(himawariOpacity * 100)}%`;
+            if (himawariTileLayer) {
+                himawariTileLayer.setOpacity(himawariOpacity);
+            }
+        });
+
+        document.getElementById('btnRefreshHimawari').addEventListener('click', () => {
+            loadLatestHimawariLayer();
+        });
+
+        loadLatestHimawariLayer();
+        setInterval(() => loadLatestHimawariLayer({ silent: true }), 10 * 60 * 1000);
+
+        // 5. 軌跡時間標籤防重疊動態調整與手動拖曳演算法 (由下至上單向避讓，支援手動拖曳且不遮擋軌跡)
+        function adjustTooltipPositions() {
+            const tooltips = Array.from(document.querySelectorAll('.fcst-date-tooltip'));
+            if (tooltips.length === 0) return;
+
+            // 先將「非手動調整」的標籤重設回預設高質感初始位置 (-8px，剛好在節點上方)
+            tooltips.forEach(el => {
+                if (el.dataset.manuallyRepositioned !== "true") {
+                    el.style.marginTop = '-8px';
+                    el.style.marginLeft = '0px';
+                    el.dataset.shiftY = -8;
+                }
+            });
+
+            if (tooltips.length >= 2) {
+                // 取得所有標籤的元素與初始邊界，並由螢幕「從下到上」（rect.top 從大到小）排序
+                // 這樣我們可以從最下方的標籤開始往上定位，重疊時只往「上方」推，絕不往下蓋住中心點或軌跡線
+                const items = tooltips.map(el => ({
+                    el,
+                    rect: el.getBoundingClientRect()
+                })).filter(item => item.rect.width > 0 && item.rect.height > 0)
+                  .sort((a, b) => b.rect.top - a.rect.top); // rect.top 大的（在螢幕下方的）排在前面
+
+                const margin = 6; // 標籤間的安全間隔像素
+
+                // 依序處理，若與下方已調整好的標籤重疊，則將自己往上推
+                for (let i = 1; i < items.length; i++) {
+                    const current = items[i];
+                    let currentRect = current.el.getBoundingClientRect();
+
+                    // 檢查是否與任何「在它下方（已處理好）」的標籤重疊
+                    for (let j = 0; j < i; j++) {
+                        const other = items[j];
+                        const otherRect = other.el.getBoundingClientRect();
+
+                        // 判斷 2D 空間是否有重疊
+                        const overlapX = !(currentRect.right + margin < otherRect.left || currentRect.left - margin > otherRect.right);
+                        const overlapY = !(currentRect.bottom + margin < otherRect.top || currentRect.top - margin > otherRect.bottom);
+
+                        if (overlapX && overlapY) {
+                            // 只有在當前標籤非手動調整時，才進行自動避讓位移
+                            if (current.el.dataset.manuallyRepositioned !== "true") {
+                                const additionalShiftUp = currentRect.bottom - otherRect.top + margin;
+                                
+                                const currentShift = parseFloat(current.el.dataset.shiftY || -8);
+                                const newShift = currentShift - additionalShiftUp;
+
+                                // 限制向上漂移的最大幅度以防離節點過遠 (最大上移為 -60px)
+                                const minShift = -60;
+                                const finalShift = Math.max(minShift, newShift);
+
+                                current.el.dataset.shiftY = finalShift;
+                                current.el.style.marginTop = `${finalShift}px`;
+
+                                // 更新當前元素的矩形位置，以便與後續的標籤做正確的重疊比較
+                                currentRect = current.el.getBoundingClientRect();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 啟用或刷新手動拖曳與雙擊重置功能
+            makeTooltipsDraggable();
+            
+            // 更新動態引導線
+            updateLeaderLines();
+        }
+
+        // 6. 讓時間標籤支援滑鼠與觸控手動拖曳自訂位置、雙擊重置功能
+        function makeTooltipsDraggable() {
+            const tooltips = document.querySelectorAll('.fcst-date-tooltip');
+            
+            tooltips.forEach(el => {
+                if (el.dataset.draggableBound) return;
+                el.dataset.draggableBound = "true";
+                
+                // 設定滑鼠移動指標樣式與防止內容被選取
+                el.style.cursor = 'move';
+                el.style.userSelect = 'none';
+                
+                // 1. 滑鼠拖曳事件
+                el.addEventListener('mousedown', function(e) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    
+                    // 標記為已被手動調整，防止自動避讓重設它
+                    el.dataset.manuallyRepositioned = "true";
+                    
+                    // 暫時停用地圖拖曳，避免拖曳標籤時地圖跟著動
+                    map.dragging.disable();
+                    
+                    const startX = e.clientX;
+                    const startY = e.clientY;
+                    
+                    // 讀取當前的偏移量
+                    const initialMarginLeft = parseFloat(el.style.marginLeft || 0);
+                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || -8);
+                    
+                    function onMouseMove(moveEvent) {
+                        const dx = moveEvent.clientX - startX;
+                        const dy = moveEvent.clientY - startY;
+                        
+                        const newMarginLeft = initialMarginLeft + dx;
+                        const newMarginTop = initialMarginTop + dy;
+                        
+                        el.style.marginLeft = `${newMarginLeft}px`;
+                        el.style.marginTop = `${newMarginTop}px`;
+                        el.dataset.shiftY = newMarginTop; // 同步給防重疊演算法
+                        
+                        // 拖曳時即時重繪引導線
+                        updateLeaderLines();
+                    }
+                    
+                    function onMouseUp() {
+                        document.removeEventListener('mousemove', onMouseMove);
+                        document.removeEventListener('mouseup', onMouseUp);
+                        
+                        // 恢復地圖拖曳
+                        map.dragging.enable();
+                    }
+                    
+                    document.addEventListener('mousemove', onMouseMove);
+                    document.addEventListener('mouseup', onMouseUp);
+                });
+                
+                // 2. 觸控拖曳事件 (支援行動裝置/平板)
+                el.addEventListener('touchstart', function(e) {
+                    if (e.touches.length !== 1) return;
+                    e.stopPropagation();
+                    
+                    el.dataset.manuallyRepositioned = "true";
+                    map.dragging.disable();
+                    
+                    const touch = e.touches[0];
+                    const startX = touch.clientX;
+                    const startY = touch.clientY;
+                    
+                    const initialMarginLeft = parseFloat(el.style.marginLeft || 0);
+                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || -8);
+                    
+                    function onTouchMove(moveEvent) {
+                        if (moveEvent.touches.length !== 1) return;
+                        const touch = moveEvent.touches[0];
+                        const dx = touch.clientX - startX;
+                        const dy = touch.clientY - startY;
+                        
+                        const newMarginLeft = initialMarginLeft + dx;
+                        const newMarginTop = initialMarginTop + dy;
+                        
+                        el.style.marginLeft = `${newMarginLeft}px`;
+                        el.style.marginTop = `${newMarginTop}px`;
+                        el.dataset.shiftY = newMarginTop;
+                        
+                        // 觸控拖曳時即時重繪引導線
+                        updateLeaderLines();
+                    }
+                    
+                    function onTouchEnd() {
+                        document.removeEventListener('touchmove', onTouchMove);
+                        document.removeEventListener('touchend', onTouchEnd);
+                        map.dragging.enable();
+                    }
+                    
+                    document.addEventListener('touchmove', onTouchMove, { passive: false });
+                    document.addEventListener('touchend', onTouchEnd);
+                }, { passive: false });
+
+                // 3. 雙擊 (Double Click) 重置事件：還原到自動避讓排版
+                el.addEventListener('dblclick', function(e) {
+                    e.stopPropagation();
+                    delete el.dataset.manuallyRepositioned;
+                    adjustTooltipPositions();
+                });
+            });
+        }
+
+        // 7. 動態引導線 (Leader Lines) 渲染演算法
+        function updateLeaderLines() {
+            if (!map) return;
+            
+            // 尋找軌跡層中的所有預測圓圈標記
+            layerFcstTrack.eachLayer(layer => {
+                if (layer instanceof L.CircleMarker && layer.getTooltip()) {
+                    const marker = layer;
+                    const tooltip = marker.getTooltip();
+                    const tooltipElement = tooltip._container;
+                    if (!tooltipElement) return;
+
+                    const dx = parseFloat(tooltipElement.style.marginLeft || 0);
+                    const dy = parseFloat(tooltipElement.dataset.shiftY || tooltipElement.style.marginTop || -8);
+
+                    // 判斷是否發生位移 (手動拖曳或自動避讓造成的偏離)
+                    const isShifted = (Math.abs(dx) > 1 || Math.abs(dy + 8) > 2);
+
+                    if (isShifted) {
+                        const markerLatLng = marker.getLatLng();
+                        const markerLayerPoint = map.latLngToLayerPoint(markerLatLng);
+
+                        // 計算引導線的對齊終點 (指向膠囊底部中央，對齊膠囊底邊線)
+                        const targetLayerPoint = L.point(
+                            markerLayerPoint.x + dx,
+                            markerLayerPoint.y + dy
+                        );
+                        const targetLatLng = map.layerPointToLatLng(targetLayerPoint);
+
+                        if (!marker.leaderLine) {
+                            // 動態建立實線引導線 (白色實線，粗細與標籤邊框 1.5px 一致)
+                            marker.leaderLine = L.polyline([markerLatLng, targetLatLng], {
+                                pane: 'trackPane',
+                                color: '#ffffff',
+                                weight: 1.5,
+                                opacity: 1.0,
+                                interactive: false
+                            }).addTo(layerFcstTrack);
+                        } else {
+                            marker.leaderLine.setLatLngs([markerLatLng, targetLatLng]);
+                        }
+                    } else {
+                        // 若無偏離，則隱藏/清空引導線
+                        if (marker.leaderLine) {
+                            marker.leaderLine.setLatLngs([]);
+                        }
+                    }
+                }
+            });
+        }
+
+        // 監聽地圖拖曳、縮放事件，以在畫面重繪後動態避開重疊與更新引導線
+        map.on('zoomend moveend', () => {
+            setTimeout(adjustTooltipPositions, 100);
+        });
+
+        // ==========================================
+        // 線上即時報文 (CWA Open Data API) 讀取邏輯
+        // ==========================================
+        const CWA_API_URL = 'https://opendata.cwa.gov.tw/fileapi/v1/opendataapi/W-C0034-005?Authorization=CWB-95B215A2-A3BF-41F2-AE8D-56A241A76D85&downloadType=WEB&format=XML';
+        
+        // CORS 代理清單 (直接請求若失敗則依序嘗試代理)
+        const CORS_PROXIES = [
+            '', // 先嘗試直接請求 (若同域或伺服器支援 CORS)
+            'https://api.allorigins.win/raw?url=',
+            'https://corsproxy.io/?',
+        ];
+
+        async function fetchCWAData() {
+            const btn = document.getElementById('btnFetchCWA');
+            const btnText = document.getElementById('btnFetchCWAText');
+            const statusEl = document.getElementById('fetchStatus');
+            
+            // UI 進入載入狀態
+            btn.disabled = true;
+            btn.classList.add('opacity-60', 'cursor-wait');
+            btn.classList.remove('cursor-pointer');
+            btnText.textContent = '正在讀取中...';
+            statusEl.classList.remove('hidden');
+            statusEl.textContent = '正在連線至中央氣象署開放資料平台...';
+            statusEl.className = 'text-[10px] text-blue-500 mt-1.5';
+
+            let lastError = null;
+
+            for (const proxy of CORS_PROXIES) {
+                try {
+                    const fetchUrl = proxy ? proxy + encodeURIComponent(CWA_API_URL) : CWA_API_URL;
+                    const response = await fetch(fetchUrl, { 
+                        signal: AbortSignal.timeout(15000) // 15 秒逾時
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    
+                    const xmlText = await response.text();
+                    const parser = new DOMParser();
+                    const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+                    
+                    // 檢查是否解析成功
+                    const parseError = xmlDoc.getElementsByTagName('parsererror');
+                    if (parseError.length > 0) {
+                        throw new Error('XML 解析失敗');
+                    }
+                    
+                    // 檢查是否有颱風資料 (可能回傳空資料表示目前無颱風)
+                    const typhoonNode = xmlDoc.getElementsByTagName('TropicalCyclone')[0];
+                    if (!typhoonNode) {
+                        // 特殊處理：API 回傳成功但無颱風資料
+                        statusEl.textContent = '⚠️ CWA 目前無發布颱風報文資料。';
+                        statusEl.className = 'text-[10px] text-amber-600 mt-1.5 font-semibold';
+                        btn.disabled = false;
+                        btn.classList.remove('opacity-60', 'cursor-wait');
+                        btn.classList.add('cursor-pointer');
+                        btnText.textContent = '讀取最新 CWA 報文';
+                        return;
+                    }
+
+                    // 成功：使用現有的 updateTyphoonFromXML 函數繪製
+                    updateTyphoonFromXML(xmlDoc);
+                    
+                    // 取得報文發布時間
+                    const sentTime = xmlDoc.getElementsByTagName('Sent')[0]?.textContent || '';
+                    const sentDisplay = sentTime ? formatCWADate(sentTime) : '未知';
+                    
+                    statusEl.textContent = `✅ 讀取成功！報文時間：${sentDisplay} CST`;
+                    statusEl.className = 'text-[10px] text-emerald-600 mt-1.5 font-semibold';
+                    
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-60', 'cursor-wait');
+                    btn.classList.add('cursor-pointer');
+                    btnText.textContent = '重新讀取 CWA 報文';
+                    return; // 成功，跳出
+                    
+                } catch (err) {
+                    lastError = err;
+                    console.warn(`CWA fetch failed via proxy "${proxy || 'direct'}":`, err.message);
+                    continue; // 嘗試下一個代理
+                }
+            }
+
+            // 所有代理均失敗
+            statusEl.textContent = `❌ 讀取失敗：${lastError?.message || '未知錯誤'}，請改用手動上傳 XML。`;
+            statusEl.className = 'text-[10px] text-red-500 mt-1.5 font-semibold';
+            btn.disabled = false;
+            btn.classList.remove('opacity-60', 'cursor-wait');
+            btn.classList.add('cursor-pointer');
+            btnText.textContent = '重試讀取 CWA 報文';
+        }
+
+        // 綁定按鈕點擊事件
+        document.getElementById('btnFetchCWA').addEventListener('click', fetchCWAData);
+
+        // 頁面載入時自動讀取最新報文
+        fetchCWAData();
+    </script>
+</body>
+</html>
