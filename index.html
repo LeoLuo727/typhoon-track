@@ -26,6 +26,10 @@
             border-radius: 6px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
             font-size: 0.875rem; 
+            pointer-events: auto !important;
+        }
+        .custom-tooltip::before {
+            display: none !important;
         }
         /* 預測時間浮動標籤樣式 - 膠囊形狀、白色邊框、不透明度調低的半透明深色底 */
         .fcst-date-tooltip {
@@ -47,6 +51,36 @@
             filter: contrast(1.14) saturate(1.03);
             image-rendering: auto;
         }
+        #headerTitle {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            line-height: 1.25;
+        }
+        .intensity-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.12rem 0.45rem;
+            border-radius: 0.4rem;
+            font-size: 0.72em;
+            font-weight: 800;
+            line-height: 1.2;
+            letter-spacing: 0;
+            white-space: nowrap;
+        }
+        .intensity-light {
+            background: #facc15;
+            color: #111827;
+        }
+        .intensity-medium {
+            background: #f97316;
+            color: #ffffff;
+        }
+        .intensity-strong {
+            background: #dc2626;
+            color: #ffffff;
+        }
     </style>
 </head>
 <body class="bg-slate-900 flex flex-col relative">
@@ -64,7 +98,11 @@
     <!-- 標題列 -->
     <header class="bg-slate-800 text-white h-16 flex items-center justify-between px-6 shadow-md z-10 relative">
         <div>
-            <h1 id="headerTitle" class="text-lg md:text-xl font-bold tracking-wider">TY HAGUPIT 哈格比颱風預測路徑</h1>
+            <h1 id="headerTitle" class="text-lg md:text-xl font-bold tracking-wider">
+                <span>TY HAGUPIT</span>
+                <span class="intensity-badge intensity-light">輕度颱風</span>
+                <span>哈格比預測路徑</span>
+            </h1>
             <p id="headerTime" class="text-xs text-gray-300">資料來源：中央氣象署 CWA (更新時間：載入中...)</p>
         </div>
         <div class="flex items-center gap-4">
@@ -314,6 +352,54 @@
             return `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
         }
 
+        function getFirstTagText(parent, tagNames) {
+            if (!parent) return "";
+            for (const tagName of tagNames) {
+                const directNode = parent.getElementsByTagName(tagName)[0];
+                if (directNode?.textContent?.trim()) {
+                    return directNode.textContent.trim();
+                }
+            }
+
+            const normalizedNames = tagNames.map(tagName => tagName.toLowerCase().replace(/[_-]/g, ''));
+            const nodes = Array.from(parent.getElementsByTagName('*'));
+            const matchedNode = nodes.find(node => normalizedNames.includes(node.tagName.toLowerCase().replace(/[_-]/g, '')));
+            return matchedNode?.textContent?.trim() || "";
+        }
+
+        function getTyphoonIntensityLevel(maxWindSpeed) {
+            if (!Number.isFinite(maxWindSpeed)) return null;
+            if (maxWindSpeed >= 51) return { label: '強烈颱風', className: 'intensity-strong' };
+            if (maxWindSpeed >= 32.7) return { label: '中度颱風', className: 'intensity-medium' };
+            if (maxWindSpeed >= 17.2) return { label: '輕度颱風', className: 'intensity-light' };
+            return null;
+        }
+
+        function updateHeaderTitle({ tyName, cwaTyName, tdNo, intensity }) {
+            const titleEl = document.getElementById('headerTitle');
+            titleEl.replaceChildren();
+
+            if (!cwaTyName) {
+                titleEl.textContent = `TD${tdNo} 熱帶性低氣壓預測路徑`;
+                return;
+            }
+
+            const tyNameEl = document.createElement('span');
+            tyNameEl.textContent = `TY ${tyName}`;
+            titleEl.appendChild(tyNameEl);
+
+            if (intensity) {
+                const badgeEl = document.createElement('span');
+                badgeEl.className = `intensity-badge ${intensity.className}`;
+                badgeEl.textContent = intensity.label;
+                titleEl.appendChild(badgeEl);
+            }
+
+            const cwaNameEl = document.createElement('span');
+            cwaNameEl.textContent = `${cwaTyName}預測路徑`;
+            titleEl.appendChild(cwaNameEl);
+        }
+
         // --- 核心幾何演算法：使用 Turf.js 計算完美的 70% 潛勢平滑包絡線 ---
         function computeTurfRibbon(pathLatLon, radiiKm) {
             let polys = [];
@@ -378,7 +464,6 @@
                 const tyName = xmlDoc.getElementsByTagName("TyphoonName")[0]?.textContent || "";
                 const tdNo = xmlDoc.getElementsByTagName("CwaTdNo")[0]?.textContent || "";
                 const displayName = cwaTyName ? `${cwaTyName} (${tyName})` : `熱帶性低氣壓 TD${tdNo}`;
-                const titlePrefix = cwaTyName ? `TY ${tyName} ${cwaTyName}颱風` : `TD${tdNo} 熱帶性低氣壓`;
                 
                 // 解析過去路徑
                 const analysisFixes = Array.from(xmlDoc.getElementsByTagName("AnalysisData")[0]?.getElementsByTagName("Fix") || []);
@@ -386,6 +471,7 @@
                 let lastPressure = "";
                 let lastDateIso = "";
                 let last15msRadius = 0;
+                let lastMaxWindSpeed = NaN;
 
                 analysisFixes.forEach(fix => {
                     const lat = parseFloat(fix.getElementsByTagName("CoordinateLatitude")[0]?.textContent);
@@ -394,6 +480,13 @@
                     
                     lastDateIso = fix.getElementsByTagName("DateTime")[0]?.textContent;
                     lastPressure = fix.getElementsByTagName("Pressure")[0]?.textContent;
+                    lastMaxWindSpeed = parseFloat(getFirstTagText(fix, [
+                        "MaxWindSpeed",
+                        "MaximumWindSpeed",
+                        "max_wind_speed",
+                        "maximum_wind_speed",
+                        "maxWindSpeed",
+                    ]));
                     
                     const circle15 = fix.getElementsByTagName("Circle15ms")[0];
                     if (circle15 && circle15.getElementsByTagName("Radius").length > 0) {
@@ -404,7 +497,12 @@
                 });
 
                 // 更新 UI 標題
-                document.getElementById('headerTitle').innerText = `${titlePrefix}預測路徑`;
+                updateHeaderTitle({
+                    tyName,
+                    cwaTyName,
+                    tdNo,
+                    intensity: cwaTyName ? getTyphoonIntensityLevel(lastMaxWindSpeed) : null,
+                });
                 document.getElementById('headerTime').innerText = `資料來源：中央氣象署 CWA (更新時間：${formatCWADate(lastDateIso)} CST)`;
 
                 // 解析未來預測路徑
@@ -502,7 +600,7 @@
                         L.circleMarker(pt, { pane: 'trackPane', radius: 7, color: '#ffffff', weight: 2, fill: true, fillColor: '#ef4444', fillOpacity: 1 })
                             .addTo(layerCenter)
                             .bindTooltip(`${formatCWADate(lastDateIso)}<br>${displayName}<br>中心氣壓 ${lastPressure} hPa`, {
-                                permanent: true, direction: 'right', className: 'custom-tooltip'
+                                permanent: true, direction: 'right', className: 'custom-tooltip current-position-tooltip'
                             });
                     } else {
                         L.circleMarker(pt, { pane: 'trackPane', radius: 3, color: '#ffffff', weight: 1, fill: true, fillColor: '#64748b', fillOpacity: 1 }).addTo(layerPastTrack);
@@ -1077,7 +1175,6 @@
         // 5. 軌跡時間標籤防重疊動態調整與手動拖曳演算法 (由下至上單向避讓，支援手動拖曳且不遮擋軌跡)
         function adjustTooltipPositions() {
             const tooltips = Array.from(document.querySelectorAll('.fcst-date-tooltip'));
-            if (tooltips.length === 0) return;
 
             // 先將「非手動調整」的標籤重設回預設高質感初始位置 (-8px，剛好在節點上方)
             tooltips.forEach(el => {
@@ -1143,13 +1240,21 @@
             updateLeaderLines();
         }
 
-        // 6. 讓時間標籤支援滑鼠與觸控手動拖曳自訂位置、雙擊重置功能
+        // 6. 讓時間標籤與目前位置標籤支援滑鼠與觸控手動拖曳自訂位置、雙擊重置功能
+        function getTooltipDefaultShift(el) {
+            const defaultX = parseFloat(el.dataset.defaultShiftX || 0);
+            const defaultY = parseFloat(el.dataset.defaultShiftY || (el.classList.contains('fcst-date-tooltip') ? -8 : 0));
+            return { x: defaultX, y: defaultY };
+        }
+
         function makeTooltipsDraggable() {
-            const tooltips = document.querySelectorAll('.fcst-date-tooltip');
+            const tooltips = document.querySelectorAll('.fcst-date-tooltip, .current-position-tooltip');
             
             tooltips.forEach(el => {
                 if (el.dataset.draggableBound) return;
                 el.dataset.draggableBound = "true";
+                el.dataset.defaultShiftX = el.dataset.defaultShiftX || "0";
+                el.dataset.defaultShiftY = el.dataset.defaultShiftY || (el.classList.contains('fcst-date-tooltip') ? "-8" : "0");
                 
                 // 設定滑鼠移動指標樣式與防止內容被選取
                 el.style.cursor = 'move';
@@ -1170,8 +1275,9 @@
                     const startY = e.clientY;
                     
                     // 讀取當前的偏移量
-                    const initialMarginLeft = parseFloat(el.style.marginLeft || 0);
-                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || -8);
+                    const defaultShift = getTooltipDefaultShift(el);
+                    const initialMarginLeft = parseFloat(el.style.marginLeft || defaultShift.x);
+                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || defaultShift.y);
                     
                     function onMouseMove(moveEvent) {
                         const dx = moveEvent.clientX - startX;
@@ -1212,8 +1318,9 @@
                     const startX = touch.clientX;
                     const startY = touch.clientY;
                     
-                    const initialMarginLeft = parseFloat(el.style.marginLeft || 0);
-                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || -8);
+                    const defaultShift = getTooltipDefaultShift(el);
+                    const initialMarginLeft = parseFloat(el.style.marginLeft || defaultShift.x);
+                    const initialMarginTop = parseFloat(el.dataset.shiftY || el.style.marginTop || defaultShift.y);
                     
                     function onTouchMove(moveEvent) {
                         if (moveEvent.touches.length !== 1) return;
@@ -1246,58 +1353,101 @@
                 el.addEventListener('dblclick', function(e) {
                     e.stopPropagation();
                     delete el.dataset.manuallyRepositioned;
+                    const defaultShift = getTooltipDefaultShift(el);
+                    el.style.marginLeft = `${defaultShift.x}px`;
+                    el.style.marginTop = `${defaultShift.y}px`;
+                    el.dataset.shiftY = defaultShift.y;
                     adjustTooltipPositions();
                 });
             });
         }
 
         // 7. 動態引導線 (Leader Lines) 渲染演算法
+        function getTooltipAnchorLatLng(marker, tooltipElement, mode, dx, dy) {
+            if (mode === 'current') {
+                const markerLayerPoint = map.latLngToLayerPoint(marker.getLatLng());
+                return map.layerPointToLatLng(L.point(
+                    markerLayerPoint.x + dx,
+                    markerLayerPoint.y + dy
+                ));
+            }
+
+            const rect = tooltipElement.getBoundingClientRect();
+            const mapRect = map.getContainer().getBoundingClientRect();
+            const markerPoint = map.latLngToContainerPoint(marker.getLatLng());
+
+            if (mode === 'date') {
+                return map.containerPointToLatLng(L.point(
+                    rect.left + rect.width / 2 - mapRect.left,
+                    rect.bottom - mapRect.top
+                ));
+            }
+
+            const tooltipLeft = rect.left - mapRect.left;
+            const tooltipRight = rect.right - mapRect.left;
+            const tooltipTop = rect.top - mapRect.top;
+            const tooltipBottom = rect.bottom - mapRect.top;
+            const targetX = Math.min(Math.max(markerPoint.x, tooltipLeft), tooltipRight);
+            const targetY = Math.min(Math.max(markerPoint.y, tooltipTop), tooltipBottom);
+            return map.containerPointToLatLng(L.point(targetX, targetY));
+        }
+
+        function updateTooltipLeaderLine(marker, options) {
+            const tooltip = marker.getTooltip();
+            const tooltipElement = tooltip?._container;
+            if (!tooltipElement) return;
+
+            const defaultShift = getTooltipDefaultShift(tooltipElement);
+            const dx = parseFloat(tooltipElement.style.marginLeft || defaultShift.x);
+            const dy = parseFloat(tooltipElement.dataset.shiftY || tooltipElement.style.marginTop || defaultShift.y);
+            const isShifted = (Math.abs(dx - defaultShift.x) > 1 || Math.abs(dy - defaultShift.y) > 2);
+
+            if (options.alwaysVisible || isShifted) {
+                const markerLatLng = marker.getLatLng();
+                const targetLatLng = getTooltipAnchorLatLng(marker, tooltipElement, options.mode, dx, dy);
+
+                if (!marker.leaderLine) {
+                    marker.leaderLine = L.polyline([markerLatLng, targetLatLng], {
+                        pane: 'trackPane',
+                        color: options.color,
+                        weight: options.weight,
+                        opacity: 1.0,
+                        interactive: false
+                    }).addTo(options.layerGroup);
+                } else {
+                    marker.leaderLine.setLatLngs([markerLatLng, targetLatLng]);
+                }
+            } else if (marker.leaderLine) {
+                marker.leaderLine.setLatLngs([]);
+            }
+        }
+
         function updateLeaderLines() {
             if (!map) return;
             
             // 尋找軌跡層中的所有預測圓圈標記
             layerFcstTrack.eachLayer(layer => {
                 if (layer instanceof L.CircleMarker && layer.getTooltip()) {
-                    const marker = layer;
-                    const tooltip = marker.getTooltip();
-                    const tooltipElement = tooltip._container;
-                    if (!tooltipElement) return;
+                    updateTooltipLeaderLine(layer, {
+                        mode: 'date',
+                        color: '#ffffff',
+                        weight: 1.5,
+                        layerGroup: layerFcstTrack,
+                        alwaysVisible: false
+                    });
+                }
+            });
 
-                    const dx = parseFloat(tooltipElement.style.marginLeft || 0);
-                    const dy = parseFloat(tooltipElement.dataset.shiftY || tooltipElement.style.marginTop || -8);
-
-                    // 判斷是否發生位移 (手動拖曳或自動避讓造成的偏離)
-                    const isShifted = (Math.abs(dx) > 1 || Math.abs(dy + 8) > 2);
-
-                    if (isShifted) {
-                        const markerLatLng = marker.getLatLng();
-                        const markerLayerPoint = map.latLngToLayerPoint(markerLatLng);
-
-                        // 計算引導線的對齊終點 (指向膠囊底部中央，對齊膠囊底邊線)
-                        const targetLayerPoint = L.point(
-                            markerLayerPoint.x + dx,
-                            markerLayerPoint.y + dy
-                        );
-                        const targetLatLng = map.layerPointToLatLng(targetLayerPoint);
-
-                        if (!marker.leaderLine) {
-                            // 動態建立實線引導線 (白色實線，粗細與標籤邊框 1.5px 一致)
-                            marker.leaderLine = L.polyline([markerLatLng, targetLatLng], {
-                                pane: 'trackPane',
-                                color: '#ffffff',
-                                weight: 1.5,
-                                opacity: 1.0,
-                                interactive: false
-                            }).addTo(layerFcstTrack);
-                        } else {
-                            marker.leaderLine.setLatLngs([markerLatLng, targetLatLng]);
-                        }
-                    } else {
-                        // 若無偏離，則隱藏/清空引導線
-                        if (marker.leaderLine) {
-                            marker.leaderLine.setLatLngs([]);
-                        }
-                    }
+            // 目前位置紅框標籤：永遠用紅色引導線連接回中心點，拖曳時即時更新。
+            layerCenter.eachLayer(layer => {
+                if (layer instanceof L.CircleMarker && layer.getTooltip()) {
+                    updateTooltipLeaderLine(layer, {
+                        mode: 'current',
+                        color: '#ef4444',
+                        weight: 2,
+                        layerGroup: layerCenter,
+                        alwaysVisible: true
+                    });
                 }
             });
         }
