@@ -163,6 +163,14 @@
                 </div>
 
                 <div class="flex flex-col gap-2">
+                    <!-- 颱風路徑總開關 -->
+                    <button id="typhoonMasterToggle" type="button" class="flex items-center justify-between w-full px-3 py-2 bg-rose-50 text-rose-700 border border-rose-200 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" aria-pressed="true">
+                        <div class="flex items-center gap-2">
+                            <div id="typhoonMasterDot" class="w-3 h-3 rounded-full bg-rose-500 indicator-dot transition-colors"></div>
+                            <span>颱風路徑總開關</span>
+                        </div>
+                        <span id="typhoonMasterStatus" class="text-xs opacity-70 status-text">顯示</span>
+                    </button>
                     <!-- 70% 潛勢預測區 -->
                     <button data-layer="prob" class="layer-toggle-btn flex items-center justify-between w-full px-3 py-2 bg-slate-100 text-slate-800 border border-slate-300 rounded-lg font-bold transition-all shadow-sm hover:brightness-95" data-active-bg="bg-slate-100" data-active-text="text-slate-800" data-active-border="border-slate-300" data-dot="bg-white border-2 border-slate-400">
                         <div class="flex items-center gap-2">
@@ -220,9 +228,15 @@
                     </button>
                     <div class="mt-2 flex items-center gap-2">
                         <label for="himawariOpacity" class="text-[10px] text-slate-500 w-12 shrink-0">透明度</label>
-                        <input type="range" id="himawariOpacity" min="0" max="1" step="0.05" value="0.75" class="flex-1 h-1 accent-sky-500 cursor-pointer">
-                        <span id="himawariOpacityVal" class="text-[10px] text-slate-500 w-9 text-right">75%</span>
+                        <input type="range" id="himawariOpacity" min="0" max="1" step="0.05" value="1" class="flex-1 h-1 accent-sky-500 cursor-pointer">
+                        <span id="himawariOpacityVal" class="text-[10px] text-slate-500 w-9 text-right">100%</span>
                         <button id="btnRefreshHimawari" class="px-2 py-1 bg-white border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold text-slate-600 transition-colors shadow-sm" title="重新讀取最新 Himawari 融合雲圖">更新</button>
+                    </div>
+                    <div id="himawariTimeControls" class="mt-2 grid grid-cols-4 gap-1.5">
+                        <button type="button" class="himawari-time-btn px-2 py-1 bg-sky-600 text-white border border-sky-600 rounded text-[10px] font-bold transition-colors shadow-sm" data-offset-hours="0">最新</button>
+                        <button type="button" class="himawari-time-btn px-2 py-1 bg-white text-slate-600 border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold transition-colors shadow-sm" data-offset-hours="1">1小時前</button>
+                        <button type="button" class="himawari-time-btn px-2 py-1 bg-white text-slate-600 border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold transition-colors shadow-sm" data-offset-hours="2">2小時前</button>
+                        <button type="button" class="himawari-time-btn px-2 py-1 bg-white text-slate-600 border border-slate-300 hover:bg-slate-100 rounded text-[10px] font-bold transition-colors shadow-sm" data-offset-hours="3">3小時前</button>
                     </div>
                     <p id="himawariStatus" class="text-[10px] text-gray-400 mt-1.5">正在讀取 JMA 最新融合雲圖...</p>
                 </div>
@@ -703,33 +717,103 @@
         });
 
         // 3. 圖層開關控制
-        const layerMap = { 'prob': layerProbArea, 'fcstWind': layerFcstWind, 'currWind': layerCurrWind, 'fcstTrack': layerFcstTrack, 'pastTrack': layerPastTrack, 'himawari': layerHimawari };
+        const layerMap = {
+            'prob': layerProbArea,
+            'fcstWind': layerFcstWind,
+            'currWind': layerCurrWind,
+            'fcstTrack': layerFcstTrack,
+            'pastTrack': layerPastTrack,
+            'center': layerCenter,
+            'himawari': layerHimawari
+        };
+        const typhoonLayerKeys = ['prob', 'fcstWind', 'currWind', 'fcstTrack', 'pastTrack', 'center'];
+        const typhoonMasterBtn = document.getElementById('typhoonMasterToggle');
+        const typhoonMasterDot = document.getElementById('typhoonMasterDot');
+        const typhoonMasterStatus = document.getElementById('typhoonMasterStatus');
+
+        function setLayerButtonState(btn, isVisible) {
+            if (!btn) return;
+
+            const activeBg = btn.getAttribute('data-active-bg');
+            const activeText = btn.getAttribute('data-active-text');
+            const activeBorder = btn.getAttribute('data-active-border');
+            const dotColorString = btn.getAttribute('data-dot');
+            const dot = btn.querySelector('.indicator-dot');
+            const statusText = btn.querySelector('.status-text');
+
+            if (isVisible) {
+                btn.classList.remove('bg-slate-800/60', 'text-gray-400', 'border-transparent');
+                btn.classList.add(activeBg, activeText, activeBorder, 'shadow-sm');
+                dot.className = `w-3 h-3 rounded-full indicator-dot transition-colors ${dotColorString}`;
+                statusText.innerText = '顯示';
+            } else {
+                btn.classList.remove(activeBg, activeText, activeBorder, 'shadow-sm');
+                btn.classList.add('bg-slate-800/60', 'text-gray-400', 'border-transparent');
+                dot.className = 'w-3 h-3 rounded-full indicator-dot transition-colors bg-gray-500';
+                statusText.innerText = '隱藏';
+            }
+        }
+
+        function setLayerVisibility(layerKey, isVisible) {
+            const layer = layerMap[layerKey];
+            if (!layer) return;
+
+            if (isVisible && !map.hasLayer(layer)) {
+                map.addLayer(layer);
+            } else if (!isVisible && map.hasLayer(layer)) {
+                map.removeLayer(layer);
+            }
+
+            setLayerButtonState(document.querySelector(`.layer-toggle-btn[data-layer="${layerKey}"]`), isVisible);
+        }
+
+        function updateTyphoonMasterState() {
+            const visibleCount = typhoonLayerKeys.filter(layerKey => map.hasLayer(layerMap[layerKey])).length;
+            const allVisible = visibleCount === typhoonLayerKeys.length;
+            const noneVisible = visibleCount === 0;
+
+            typhoonMasterBtn.setAttribute('aria-pressed', allVisible ? 'true' : 'false');
+
+            if (allVisible) {
+                typhoonMasterBtn.classList.remove('bg-slate-800/60', 'text-gray-400', 'border-transparent', 'bg-amber-50', 'text-amber-700', 'border-amber-200');
+                typhoonMasterBtn.classList.add('bg-rose-50', 'text-rose-700', 'border-rose-200', 'shadow-sm');
+                typhoonMasterDot.className = 'w-3 h-3 rounded-full bg-rose-500 indicator-dot transition-colors';
+                typhoonMasterStatus.innerText = '顯示';
+                return;
+            }
+
+            if (noneVisible) {
+                typhoonMasterBtn.classList.remove('bg-rose-50', 'text-rose-700', 'border-rose-200', 'bg-amber-50', 'text-amber-700', 'border-amber-200', 'shadow-sm');
+                typhoonMasterBtn.classList.add('bg-slate-800/60', 'text-gray-400', 'border-transparent');
+                typhoonMasterDot.className = 'w-3 h-3 rounded-full bg-gray-500 indicator-dot transition-colors';
+                typhoonMasterStatus.innerText = '隱藏';
+                return;
+            }
+
+            typhoonMasterBtn.classList.remove('bg-rose-50', 'text-rose-700', 'border-rose-200', 'bg-slate-800/60', 'text-gray-400', 'border-transparent');
+            typhoonMasterBtn.classList.add('bg-amber-50', 'text-amber-700', 'border-amber-200', 'shadow-sm');
+            typhoonMasterDot.className = 'w-3 h-3 rounded-full bg-amber-500 indicator-dot transition-colors';
+            typhoonMasterStatus.innerText = '部分';
+        }
+
+        typhoonMasterBtn.addEventListener('click', () => {
+            const allVisible = typhoonLayerKeys.every(layerKey => map.hasLayer(layerMap[layerKey]));
+            typhoonLayerKeys.forEach(layerKey => setLayerVisibility(layerKey, !allVisible));
+            updateTyphoonMasterState();
+        });
+
         document.querySelectorAll('.layer-toggle-btn').forEach(btn => {
             btn.addEventListener('click', function() {
                 const layerKey = this.getAttribute('data-layer');
-                const layer = layerMap[layerKey];
-                const activeBg = this.getAttribute('data-active-bg');
-                const activeText = this.getAttribute('data-active-text');
-                const activeBorder = this.getAttribute('data-active-border');
-                const dotColorString = this.getAttribute('data-dot');
-                const dot = this.querySelector('.indicator-dot');
-                const statusText = this.querySelector('.status-text');
+                const shouldShowLayer = !map.hasLayer(layerMap[layerKey]);
+                setLayerVisibility(layerKey, shouldShowLayer);
 
-                if (map.hasLayer(layer)) {
-                    map.removeLayer(layer);
-                    this.classList.remove(activeBg, activeText, activeBorder, 'shadow-sm');
-                    this.classList.add('bg-slate-800/60', 'text-gray-400', 'border-transparent');
-                    dot.className = 'w-3 h-3 rounded-full indicator-dot transition-colors bg-gray-500';
-                    statusText.innerText = '隱藏';
-                } else {
-                    map.addLayer(layer);
-                    this.classList.remove('bg-slate-800/60', 'text-gray-400', 'border-transparent');
-                    this.classList.add(activeBg, activeText, activeBorder, 'shadow-sm');
-                    dot.className = `w-3 h-3 rounded-full indicator-dot transition-colors ${dotColorString}`;
-                    statusText.innerText = '顯示';
+                if (typhoonLayerKeys.includes(layerKey)) {
+                    updateTyphoonMasterState();
                 }
             });
         });
+        updateTyphoonMasterState();
 
         // 4. 底圖切換邏輯
         document.getElementById('baseMapSelect').addEventListener('change', function(e) {
@@ -810,7 +894,9 @@
         ];
         let himawariTileLayer = null;
         let himawariLatestKey = '';
-        let himawariOpacity = 0.75;
+        let himawariOpacity = 1;
+        let himawariSelectedOffsetHours = 0;
+        let himawariCachedTargetTimes = [];
         const HIMAWARI_NATIVE_MIN_ZOOM = 3;
         const HIMAWARI_NATIVE_MAX_ZOOM = 5;
         const CLOUD_ALPHA_START = 30;
@@ -835,6 +921,59 @@
                 .filter(item => item && item.basetime && item.validtime)
                 .sort((a, b) => a.validtime.localeCompare(b.validtime))
                 .at(-1);
+        }
+
+        function parseJMATime(jmaTimeText) {
+            if (!/^\d{14}$/.test(jmaTimeText || '')) return null;
+            const y = Number(jmaTimeText.slice(0, 4));
+            const m = Number(jmaTimeText.slice(4, 6)) - 1;
+            const d = Number(jmaTimeText.slice(6, 8));
+            const hh = Number(jmaTimeText.slice(8, 10));
+            const mm = Number(jmaTimeText.slice(10, 12));
+            const ss = Number(jmaTimeText.slice(12, 14));
+            return new Date(Date.UTC(y, m, d, hh, mm, ss));
+        }
+
+        function formatJMATime(date) {
+            const pad = value => String(value).padStart(2, '0');
+            return [
+                date.getUTCFullYear(),
+                pad(date.getUTCMonth() + 1),
+                pad(date.getUTCDate()),
+                pad(date.getUTCHours()),
+                pad(date.getUTCMinutes()),
+                pad(date.getUTCSeconds())
+            ].join('');
+        }
+
+        function pickHimawariTimeByOffset(targetTimes, offsetHours) {
+            const sortedTimes = targetTimes
+                .filter(item => item && item.basetime && item.validtime)
+                .sort((a, b) => a.validtime.localeCompare(b.validtime));
+            const latest = sortedTimes.at(-1);
+
+            if (!latest || offsetHours <= 0) return latest;
+
+            const latestDate = parseJMATime(latest.validtime);
+            if (!latestDate) return latest;
+
+            const targetKey = formatJMATime(new Date(latestDate.getTime() - offsetHours * 60 * 60 * 1000));
+            return sortedTimes.find(item => item.validtime === targetKey)
+                || sortedTimes.filter(item => item.validtime <= targetKey).at(-1)
+                || sortedTimes[0];
+        }
+
+        function setHimawariTimeButtonState() {
+            document.querySelectorAll('.himawari-time-btn').forEach(button => {
+                const isActive = Number(button.dataset.offsetHours) === himawariSelectedOffsetHours;
+                button.classList.toggle('bg-sky-600', isActive);
+                button.classList.toggle('text-white', isActive);
+                button.classList.toggle('border-sky-600', isActive);
+                button.classList.toggle('bg-white', !isActive);
+                button.classList.toggle('text-slate-600', !isActive);
+                button.classList.toggle('border-slate-300', !isActive);
+                button.classList.toggle('hover:bg-slate-100', !isActive);
+            });
         }
 
         function formatJMATimeForTaiwan(jmaTimeText) {
@@ -1127,12 +1266,16 @@
 
         async function loadLatestHimawariLayer({ silent = false } = {}) {
             if (!silent) {
-                setHimawariStatus('正在讀取 JMA 最新融合雲圖...', 'text-blue-500');
+                const loadingLabel = himawariSelectedOffsetHours > 0
+                    ? `正在讀取 JMA ${himawariSelectedOffsetHours} 小時前融合雲圖...`
+                    : '正在讀取 JMA 最新融合雲圖...';
+                setHimawariStatus(loadingLabel, 'text-blue-500');
             }
 
             try {
                 const targetTimes = await fetchHimawariTargetTimes();
-                const latest = pickLatestHimawariTime(targetTimes);
+                himawariCachedTargetTimes = targetTimes;
+                const latest = pickHimawariTimeByOffset(targetTimes, himawariSelectedOffsetHours);
 
                 if (!latest) {
                     throw new Error('JMA 未回傳可用影像時間');
@@ -1150,7 +1293,10 @@
                     himawariLatestKey = latestKey;
                 }
 
-                setHimawariStatus(`最新 Himawari 透明融合雲圖：${displayTime} 台灣時間`, 'text-emerald-600 font-semibold');
+                const statusPrefix = himawariSelectedOffsetHours > 0
+                    ? `${himawariSelectedOffsetHours} 小時前 Himawari 透明融合雲圖`
+                    : '最新 Himawari 透明融合雲圖';
+                setHimawariStatus(`${statusPrefix}：${displayTime} 台灣時間`, 'text-emerald-600 font-semibold');
             } catch (err) {
                 console.warn('Himawari layer fetch failed:', err);
                 setHimawariStatus(`Himawari 雲圖讀取失敗：${err.message || '未知錯誤'}`, 'text-red-500 font-semibold');
@@ -1169,6 +1315,15 @@
             loadLatestHimawariLayer();
         });
 
+        document.querySelectorAll('.himawari-time-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                himawariSelectedOffsetHours = Number(button.dataset.offsetHours) || 0;
+                setHimawariTimeButtonState();
+                loadLatestHimawariLayer();
+            });
+        });
+
+        setHimawariTimeButtonState();
         loadLatestHimawariLayer();
         setInterval(() => loadLatestHimawariLayer({ silent: true }), 10 * 60 * 1000);
 
