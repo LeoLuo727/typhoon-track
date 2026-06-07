@@ -81,6 +81,17 @@
             background: #dc2626;
             color: #ffffff;
         }
+        #mainControlPanel {
+            max-height: calc(100% - 2rem);
+        }
+        #panelHeader {
+            flex-shrink: 0;
+        }
+        #panelBody {
+            min-height: 0;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+        }
     </style>
 </head>
 <body class="bg-slate-900 flex flex-col relative">
