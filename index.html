@@ -51,6 +51,10 @@
             filter: contrast(1.14) saturate(1.03);
             image-rendering: auto;
         }
+        .bbc-weather-imagery {
+            filter: brightness(0.76) contrast(1.16) saturate(0.9);
+            image-rendering: auto;
+        }
         #headerTitle {
             display: flex;
             align-items: center;
@@ -305,7 +309,8 @@
                         地圖底圖樣式
                     </h4>
                     <select id="baseMapSelect" class="w-full bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 transition-colors cursor-pointer hover:bg-slate-100 font-medium">
-                        <option value="satellite">衛星影像 (預設)</option>
+                        <option value="bbcWeather">BBC Weather 風格 (預設)</option>
+                        <option value="satellite">標準衛星影像</option>
                         <option value="topo">立體地形圖 (Topo)</option>
                         <option value="dark">高對比深色</option>
                         <option value="light">簡約淺色</option>
@@ -325,7 +330,6 @@
         map.createPane('himawariPane');
         map.getPane('himawariPane').style.zIndex = 350;
         map.getPane('himawariPane').style.pointerEvents = 'none';
-
 
         map.createPane('coastlinePane');
         map.getPane('coastlinePane').style.zIndex = 408;
@@ -351,15 +355,26 @@
         const layerCenter = L.layerGroup().addTo(map);
         const layerHimawari = L.layerGroup().addTo(map);
 
+        // BBC Weather 視覺語言：深色化高解析衛星影像，不顯示底圖地名標籤。
+        const bbcWeatherImagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            maxNativeZoom: 19,
+            maxZoom: 20,
+            className: 'bbc-weather-imagery',
+            crossOrigin: true,
+            keepBuffer: 4,
+            attribution: 'Imagery &copy; Esri'
+        });
+
         // 定義多種底圖樣式
         const baseMaps = {
+            bbcWeather: bbcWeatherImagery,
             satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: '&copy; Esri' }),
             topo: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: '&copy; Esri' }),
             dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 20 }),
             light: L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { subdomains: 'abcd', maxZoom: 20 }),
             osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 })
         };
-        let currentBaseMap = baseMaps.satellite;
+        let currentBaseMap = baseMaps.bbcWeather;
         currentBaseMap.addTo(map);
 
         // 載入高精度海岸線
@@ -371,11 +386,27 @@
                 L.geoJSON(geojson, {
                     interactive: false,
                     pane: 'coastlinePane',
-                    style: f => (f.id === '158' || f.id === 158 || (f.properties && f.properties.name === 'Taiwan')) 
-                        ? { color: '#fbbf24', weight: 4, fill: false, opacity: 1 }
-                        : { color: '#f3f4f6', weight: 2, fill: false, opacity: 0.7 }
+                    filter: f => !(f.id === '158' || f.id === 158 || (f.properties && f.properties.name === 'Taiwan')),
+                    style: { color: '#f3f4f6', weight: 2, fill: false, opacity: 0.7 }
                 }).addTo(coastlineLayer);
             });
+
+        // 使用獨立的高解析台灣國界資料，避免與低解析世界國界重疊。
+        const taiwanCoastlineLayer = L.layerGroup().addTo(map);
+        fetch('https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/9469f09/releaseData/gbOpen/TWN/ADM0/geoBoundaries-TWN-ADM0.geojson')
+            .then(res => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            })
+            .then(geojson => {
+                L.geoJSON(geojson, {
+                    interactive: false,
+                    pane: 'coastlinePane',
+                    style: { color: '#fbbf24', weight: 3.25, fill: false, opacity: 1, lineJoin: 'round' }
+                }).addTo(taiwanCoastlineLayer);
+                map.attributionControl.addAttribution('Taiwan boundary &copy; geoBoundaries');
+            })
+            .catch(err => console.warn('Taiwan coastline load failed:', err));
 
 
 
@@ -841,10 +872,12 @@
             map.removeLayer(currentBaseMap);
             currentBaseMap = baseMaps[selectedMap];
             currentBaseMap.addTo(map);
-            if (selectedMap === 'satellite' || selectedMap === 'dark' || selectedMap === 'topo') {
+            if (selectedMap === 'bbcWeather' || selectedMap === 'satellite' || selectedMap === 'dark' || selectedMap === 'topo') {
                 if (!map.hasLayer(coastlineLayer)) map.addLayer(coastlineLayer);
+                if (!map.hasLayer(taiwanCoastlineLayer)) map.addLayer(taiwanCoastlineLayer);
             } else {
                 if (map.hasLayer(coastlineLayer)) map.removeLayer(coastlineLayer);
+                if (map.hasLayer(taiwanCoastlineLayer)) map.removeLayer(taiwanCoastlineLayer);
             }
         });
 
